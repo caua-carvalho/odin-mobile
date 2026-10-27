@@ -1,1164 +1,853 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  View,
-  Text,
-  ScrollView,
-  TextInput,
-  TouchableOpacity,
-  StyleSheet,
-  KeyboardAvoidingView,
-  Platform,
-  FlatList,
-  ActivityIndicator,
   Alert,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from 'react-native'
-import { SafeAreaView } from 'react-native-safe-area-context'
-import { useLocalSearchParams } from 'expo-router'
+import { useRouter } from 'expo-router'
 import { Ionicons } from '@expo/vector-icons'
-import { api, type Approval, type Conversation, type Message, type Run, type RunEvent } from '../../lib/api'
+import Animated, { FadeInDown, FadeInUp } from 'react-native-reanimated'
+import { AgentOrb, type AgentOrbState } from '../../components/orb/AgentOrb'
+import { HudScreen } from '../../components/hud/Screen'
+import { ScreenHeader } from '../../components/hud/ScreenHeader'
+import {
+  Badge,
+  EmptyState,
+  Panel,
+  PressableScale,
+  SectionLabel,
+  StatTile,
+} from '../../components/hud/primitives'
+import { api, type Conversation, type Run, type SystemStatus } from '../../lib/api'
 import { useAuth } from '../../contexts/AuthContext'
+import { useOdinStatus } from '../../contexts/OdinStatusContext'
+import { alpha, colors, fonts, radius, spacing } from '../../lib/theme'
+import { formatRelativeTime, getErrorMessage, pluralize } from '../../lib/utils'
 
-type ToolActivity = {
-  call_id: string
-  tool: string
-  args?: unknown
-  context?: string | null
-  result?: string
-  is_error?: boolean
-  duration_s?: number | null
-  status: 'running' | 'done'
+const SUGGESTIONS = [
+  'Status geral da infraestrutura e diagnóstico dos agentes',
+  'Listar tarefas pendentes e sincronizações programadas',
+  'Quais arquivos e notas estão indexados na biblioteca?',
+]
+
+const RUN_TONE: Record<string, { label: string; tone: 'primary' | 'cyan' | 'success' | 'warning' | 'danger' | 'neutral' }> = {
+  queued: { label: 'Na fila', tone: 'neutral' },
+  running: { label: 'Executando', tone: 'primary' },
+  waiting_approval: { label: 'Aprovação', tone: 'warning' },
+  completed: { label: 'Concluída', tone: 'success' },
+  failed: { label: 'Falhou', tone: 'danger' },
+  cancelled: { label: 'Cancelada', tone: 'neutral' },
+  interrupted: { label: 'Interrompida', tone: 'neutral' },
 }
 
-type ApprovalCard = {
-  approval_id: string
-  operation: string
-  command?: string
-  description?: string
-  choices: string[]
-}
+export default function NexusScreen() {
+  const router = useRouter()
+  const { user } = useAuth()
+  const {
+    pendingApprovals,
+    activeRuns,
+    conversationTotal,
+    lastUpdated,
+    refresh: refreshStatus,
+  } = useOdinStatus()
 
-type ConnectionState = 'idle' | 'connecting' | 'live' | 'reconnecting'
+  const [prompt, setPrompt] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [conversations, setConversations] = useState<Conversation[]>([])
+  const [recentRuns, setRecentRuns] = useState<Run[]>([])
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null)
 
-const ACTIVE_STATUSES = ['queued', 'running', 'waiting_approval']
-const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled', 'interrupted']
+  const mounted = useRef(true)
 
-function isActive(status: string | null | undefined) {
-  return Boolean(status && ACTIVE_STATUSES.includes(status))
-}
-
-function delay(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function pretty(value: unknown, limit = 1200): string {
-  if (value === null || value === undefined) return ''
-  let text: string
-  if (typeof value === 'string') text = value
-  else {
-    try {
-      text = JSON.stringify(value, null, 2)
-    } catch {
-      text = String(value)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
     }
-  }
-  return text.length > limit ? `${text.slice(0, limit)}…` : text
+  }, [])
+
+  const loadLocalData = useCallback(async () => {
+    const [conversationsResult, runsResult, statusResult] = await Promise.allSettled([
+      api.listConversations({ page_size: 5 }),
+      api.listRuns({ page_size: 5 }),
+      api.getSystemStatus(),
+    ])
+    if (!mounted.current) return
+    if (conversationsResult.status === 'fulfilled') {
+      setConversations(conversationsResult.value.items)
+    }
+    if (runsResult.status === 'fulfilled') {
+      setRecentRuns(runsResult.value)
+    }
+    if (statusResult.status === 'fulfilled') {
+      setSystemStatus(statusResult.value)
+    }
+  }, [])
+
+  useEffect(() => {
+    // Initial fetch plus polling; data lands after the awaited requests resolve.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadLocalData()
+    const timer = setInterval(() => {
+      void loadLocalData()
+    }, 30_000)
+    return () => clearInterval(timer)
+  }, [loadLocalData])
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true)
+    await Promise.allSettled([refreshStatus(), loadLocalData()])
+    if (mounted.current) setRefreshing(false)
+  }, [loadLocalData, refreshStatus])
+
+  const activeRun = activeRuns[0] ?? null
+  const orbState: AgentOrbState = pendingApprovals.length > 0
+    ? 'waiting_approval'
+    : activeRun?.status === 'running'
+      ? 'working'
+      : activeRun?.status === 'queued'
+        ? 'queued'
+        : 'idle'
+
+  const statusLine = pendingApprovals.length > 0
+    ? `${pendingApprovals.length} ${pluralize(pendingApprovals.length, 'autorização pendente', 'autorizações pendentes')}`
+    : activeRun?.status === 'running'
+      ? 'Agente executando em segundo plano'
+      : activeRun?.status === 'queued'
+        ? 'Execuções na fila do agente'
+        : 'Todos os sistemas operacionais e prontos'
+
+  const dispatchCommand = useCallback(async () => {
+    const text = prompt.trim()
+    if (!text || submitting) return
+
+    setSubmitting(true)
+    setError(null)
+    try {
+      const conversation = await api.createConversation({ title: text.slice(0, 60) })
+      await api.createRun(conversation.id, { message: text })
+      setPrompt('')
+      void refreshStatus()
+      router.push({
+        pathname: '/(tabs)/chat',
+        params: { conversationId: conversation.id },
+      })
+    } catch (err) {
+      setError(getErrorMessage(err, 'Falha ao transmitir o comando para o ODIN.'))
+    } finally {
+      if (mounted.current) setSubmitting(false)
+    }
+  }, [prompt, refreshStatus, router, submitting])
+
+  const openConversation = useCallback(
+    (conversationId: string) => {
+      router.push({
+        pathname: '/(tabs)/chat',
+        params: { conversationId },
+      })
+    },
+    [router],
+  )
+
+  const resolveApproval = useCallback(
+    async (approvalId: string, decision: 'approve' | 'deny') => {
+      try {
+        if (decision === 'approve') await api.approve(approvalId)
+        else await api.deny(approvalId)
+        await refreshStatus()
+      } catch (err) {
+        Alert.alert('Falha', getErrorMessage(err, 'Não foi possível responder à autorização.'))
+      }
+    },
+    [refreshStatus],
+  )
+
+  const hermesOnline = systemStatus?.hermes_connected
+  const dbOnline = systemStatus?.database_connected
+  const overallOk = systemStatus?.overall === 'ok'
+
+  return (
+    <HudScreen
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={() => void handleRefresh()}
+          tintColor={colors.primary}
+          colors={[colors.primary]}
+          progressBackgroundColor={colors.elevated}
+        />
+      }
+      contentContainerStyle={styles.content}
+    >
+      <ScreenHeader
+        eyebrow="Odin · Command Nexus"
+        title={`Olá, ${user?.email?.split('@')[0] ?? 'operador'}.`}
+        subtitle="Centro de comando do seu nó neural. Despache diretrizes, acompanhe execuções e valide protocolos."
+        right={
+          <Badge
+            label={overallOk ? 'Online' : 'Degradado'}
+            tone={overallOk ? 'success' : 'warning'}
+            dot
+          />
+        }
+      />
+
+      {pendingApprovals.length > 0 ? (
+        <Animated.View entering={FadeInDown.duration(380)} style={styles.section}>
+          <Panel glow="orange" style={styles.alertPanel}>
+            <View style={styles.alertRow}>
+              <View style={styles.alertIcon}>
+                <Ionicons name="shield-half-outline" size={19} color={colors.warningLight} />
+              </View>
+              <View style={styles.alertCopy}>
+                <Text style={styles.alertTitle}>Protocolo de segurança ativo</Text>
+                <Text style={styles.alertText}>
+                  {pendingApprovals.length}{' '}
+                  {pluralize(pendingApprovals.length, 'operação crítica aguarda', 'operações críticas aguardam')}{' '}
+                  validação do operador.
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.approvalList}>
+              {pendingApprovals.slice(0, 2).map((approval) => (
+                <View key={approval.id} style={styles.approvalItem}>
+                  <View style={styles.approvalInfo}>
+                    <Text style={styles.approvalOperation} numberOfLines={1}>
+                      {approval.operation}
+                    </Text>
+                    <Text style={styles.approvalMeta} numberOfLines={1}>
+                      Run {approval.run_id.slice(0, 8)} · {formatRelativeTime(approval.created_at)}
+                    </Text>
+                  </View>
+                  <View style={styles.approvalActions}>
+                    <PressableScale
+                      accessibilityLabel="Negar autorização"
+                      haptic="light"
+                      onPress={() => void resolveApproval(approval.id, 'deny')}
+                      style={styles.approvalAction}
+                    >
+                      <Ionicons name="close" size={16} color={colors.dangerLight} />
+                    </PressableScale>
+                    <PressableScale
+                      accessibilityLabel="Aprovar autorização"
+                      haptic="medium"
+                      onPress={() => void resolveApproval(approval.id, 'approve')}
+                      style={[styles.approvalAction, styles.approvalActionPrimary]}
+                    >
+                      <Ionicons name="checkmark" size={16} color={colors.bg} />
+                    </PressableScale>
+                  </View>
+                </View>
+              ))}
+            </View>
+          </Panel>
+        </Animated.View>
+      ) : null}
+
+      <Animated.View entering={FadeInUp.delay(60).duration(520)} style={styles.heroWrap}>
+        <AgentOrb state={orbState} size={206} label="Núcleo ODIN" />
+        <View style={styles.heroCopy}>
+          <Text style={styles.heroEyebrow}>SISTEMA NEURAL ATIVO</Text>
+          <Text style={styles.heroTitle}>ODIN COMMAND CORE</Text>
+          <View style={styles.statusRow}>
+            <View style={[styles.statusDot, { backgroundColor: statusLine.includes('pendente') ? colors.warning : colors.primary }]} />
+            <Text style={styles.statusText}>{statusLine}</Text>
+          </View>
+        </View>
+      </Animated.View>
+
+      <View style={styles.section}>
+        <SectionLabel title="Diretriz rápida" right={<Text style={styles.sectionHint}>Enter para disparar</Text>} />
+        <View style={styles.commandShell}>
+          <Ionicons name="terminal-outline" size={19} color={colors.primary} />
+          <TextInput
+            value={prompt}
+            onChangeText={setPrompt}
+            placeholder="Transmitir diretriz ou comando para o ODIN…"
+            placeholderTextColor={colors.dim}
+            multiline
+            maxLength={4000}
+            editable={!submitting}
+            style={styles.commandInput}
+            selectionColor={colors.primary}
+            onSubmitEditing={() => void dispatchCommand()}
+            blurOnSubmit={false}
+          />
+          <PressableScale
+            accessibilityLabel="Enviar comando"
+            haptic="medium"
+            onPress={() => void dispatchCommand()}
+            disabled={!prompt.trim() || submitting}
+            style={[
+              styles.sendButton,
+              (!prompt.trim() || submitting) && styles.sendButtonDisabled,
+            ]}
+          >
+            <Ionicons
+              name={submitting ? 'sync' : 'arrow-up'}
+              size={20}
+              color={colors.bg}
+            />
+          </PressableScale>
+        </View>
+        {error ? (
+          <View style={styles.errorRow}>
+            <Ionicons name="warning-outline" size={14} color={colors.dangerLight} />
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
+        ) : null}
+      </View>
+
+      <View style={styles.statsRow}>
+        <StatTile label="Execuções" value={recentRuns.length} tone="primary" />
+        <StatTile
+          label="Aprovações"
+          value={pendingApprovals.length}
+          tone={pendingApprovals.length > 0 ? 'warning' : 'neutral'}
+        />
+        <StatTile label="Sessões" value={conversationTotal} tone="cyan" />
+      </View>
+
+      <View style={styles.section}>
+        <SectionLabel
+          title="Sessões recentes"
+          right={
+            <PressableScale
+              accessibilityLabel="Abrir chat"
+              haptic="none"
+              onPress={() => router.push('/(tabs)/chat')}
+            >
+              <Text style={styles.linkText}>Abrir chat</Text>
+            </PressableScale>
+          }
+        />
+        <Panel padded={false}>
+          {conversations.length === 0 ? (
+            <EmptyState
+              icon="chatbubbles-outline"
+              title="Nenhuma sessão ainda"
+              description="Despache uma diretriz acima para abrir seu primeiro canal com o Hermes."
+            />
+          ) : (
+            conversations.slice(0, 4).map((conversation, index) => (
+              <PressableScale
+                key={conversation.id}
+                accessibilityLabel={`Abrir ${conversation.title ?? 'conversa'}`}
+                haptic="selection"
+                onPress={() => openConversation(conversation.id)}
+                style={styles.conversationPress}
+              >
+                <View
+                  style={[
+                    styles.conversationRow,
+                    index > 0 && styles.conversationRowBorder,
+                  ]}
+                >
+                  <View style={styles.conversationIcon}>
+                    <Ionicons name="chatbubble-ellipses-outline" size={16} color={colors.primaryLight} />
+                  </View>
+                  <View style={styles.conversationCopy}>
+                    <Text style={styles.conversationTitle} numberOfLines={1}>
+                      {conversation.title || `Sessão ${conversation.id.slice(0, 8)}`}
+                    </Text>
+                    <Text style={styles.conversationMeta}>
+                      {conversation.message_count} {pluralize(conversation.message_count, 'mensagem', 'mensagens')} ·{' '}
+                      {formatRelativeTime(conversation.updated_at)}
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={colors.faint} />
+                </View>
+              </PressableScale>
+            ))
+          )}
+        </Panel>
+      </View>
+
+      {recentRuns.length > 0 ? (
+        <View style={styles.section}>
+          <SectionLabel
+            title="Atividade recente"
+            right={
+              <PressableScale
+                accessibilityLabel="Ver atividade"
+                haptic="none"
+                onPress={() => router.push('/(tabs)/activity')}
+              >
+                <Text style={styles.linkText}>Ver tudo</Text>
+              </PressableScale>
+            }
+          />
+          <Panel padded={false}>
+            {recentRuns.slice(0, 4).map((run, index) => {
+              const meta = RUN_TONE[run.status] ?? RUN_TONE.queued
+              return (
+                <PressableScale
+                  key={run.id}
+                  accessibilityLabel={`Abrir execução ${run.id.slice(0, 8)}`}
+                  haptic="selection"
+                  onPress={() => openConversation(run.conversation_id)}
+                  style={styles.conversationPress}
+                >
+                  <View
+                    style={[
+                      styles.runRow,
+                      index > 0 && styles.conversationRowBorder,
+                    ]}
+                  >
+                    <View style={styles.runCopy}>
+                      <Text style={styles.runTitle} numberOfLines={1}>
+                        {run.result_summary || `Run ${run.id.slice(0, 8)}`}
+                      </Text>
+                      <Text style={styles.conversationMeta}>
+                        {formatRelativeTime(run.started_at)}
+                      </Text>
+                    </View>
+                    <Badge label={meta.label} tone={meta.tone} dot />
+                  </View>
+                </PressableScale>
+              )
+            })}
+          </Panel>
+        </View>
+      ) : null}
+
+      <View style={styles.section}>
+        <SectionLabel title="Telemetria do nó" />
+        <Panel>
+          <View style={styles.telemetryGrid}>
+            <TelemetryRow
+              label="Hermes"
+              value={hermesOnline ? 'Conectado' : 'Desconectado'}
+              ok={Boolean(hermesOnline)}
+            />
+            <TelemetryRow
+              label="Banco"
+              value={dbOnline ? 'Online' : 'Falha'}
+              ok={Boolean(dbOnline)}
+            />
+            <TelemetryRow
+              label="Saúde"
+              value={systemStatus?.overall ?? '—'}
+              ok={overallOk}
+            />
+            <TelemetryRow
+              label="Versão"
+              value={systemStatus?.version ?? '—'}
+              ok
+            />
+          </View>
+          <View style={styles.telemetryFooter}>
+            <Ionicons name="time-outline" size={12} color={colors.faint} />
+            <Text style={styles.telemetryFooterText}>
+              Sincronizado {lastUpdated ? formatRelativeTime(lastUpdated) : '—'}
+            </Text>
+          </View>
+        </Panel>
+      </View>
+
+      <View style={styles.section}>
+        <SectionLabel title="Diretrizes sugeridas" />
+        <View style={styles.suggestionList}>
+          {SUGGESTIONS.map((suggestion) => (
+            <PressableScale
+              key={suggestion}
+              accessibilityLabel={`Usar sugestão: ${suggestion}`}
+              haptic="selection"
+              onPress={() => setPrompt(suggestion)}
+              style={styles.suggestionPress}
+            >
+              <View style={styles.suggestionRow}>
+                <Ionicons name="sparkles-outline" size={15} color={colors.cyan} />
+                <Text style={styles.suggestionText} numberOfLines={2}>
+                  {suggestion}
+                </Text>
+                <Ionicons name="arrow-forward" size={14} color={colors.faint} />
+              </View>
+            </PressableScale>
+          ))}
+        </View>
+      </View>
+
+      <View style={styles.footer}>
+        <Ionicons name="lock-closed-outline" size={12} color={colors.faint} />
+        <Text style={styles.footerText}>INTERFACE NEURAL ODIN · V2 · MOBILE ARM</Text>
+      </View>
+    </HudScreen>
+  )
 }
 
-function approvalFromEvent(data: Record<string, any>): ApprovalCard {
-  return {
-    approval_id: String(data.approval_id || ''),
-    operation: String(data.operation || data.details?.tool_name || 'ação'),
-    command: data.command || data.details?.command || '',
-    description: data.description || data.details?.description || '',
-    choices: Array.isArray(data.choices) && data.choices.length ? data.choices.map(String) : ['once', 'deny'],
-  }
-}
-
-function approvalFromRecord(record: Approval): ApprovalCard {
-  const details = (record.details || {}) as Record<string, any>
-  return {
-    approval_id: record.id,
-    operation: record.operation || 'ação',
-    command: details.command || '',
-    description: details.description || '',
-    choices:
-      Array.isArray(details.choices) && details.choices.length
-        ? details.choices.map(String)
-        : ['once', 'deny'],
-  }
-}
-
-function choiceLabel(choice: string): string {
-  switch (choice) {
-    case 'once':
-      return 'Permitir'
-    case 'session':
-      return 'Nesta sessão'
-    case 'always':
-      return 'Sempre'
-    case 'deny':
-      return 'Negar'
-    default:
-      return choice
-  }
-}
-
-function upsertTool(tools: ToolActivity[], data: Record<string, any>): ToolActivity[] {
-  const id = String(data.call_id || data.tool || `tool-${tools.length}`)
-  const index = tools.findIndex((tool) => tool.call_id === id)
-  const next: ToolActivity = {
-    call_id: id,
-    tool: String(data.tool || 'ferramenta'),
-    args: data.args,
-    context: data.context || null,
-    status: 'running',
-  }
-  if (index === -1) return [...tools, next]
-  const copy = [...tools]
-  copy[index] = { ...copy[index], ...next, status: copy[index].status }
-  return copy
-}
-
-function completeTool(tools: ToolActivity[], data: Record<string, any>): ToolActivity[] {
-  const id = String(data.call_id || data.tool || '')
-  const index = tools.findIndex((tool) => tool.call_id === id)
-  const done: ToolActivity = {
-    call_id: id,
-    tool: String(data.tool || (index >= 0 ? tools[index].tool : 'ferramenta')),
-    args: index >= 0 ? tools[index].args : undefined,
-    context: index >= 0 ? tools[index].context : null,
-    result: pretty(data.result),
-    is_error: Boolean(data.is_error),
-    duration_s: data.duration_s ?? null,
-    status: 'done',
-  }
-  if (index === -1) return [...tools, done]
-  const copy = [...tools]
-  copy[index] = { ...copy[index], ...done }
-  return copy
-}
-
-function mergedTools(message: Message): ToolActivity[] {
-  const byId = new Map<string, ToolActivity>()
-  for (const call of message.tool_calls || []) {
-    const id = String(call?.call_id || '')
-    if (!id) continue
-    byId.set(id, {
-      call_id: id,
-      tool: String(call.tool || 'ferramenta'),
-      args: call.args,
-      context: call.context || null,
-      status: 'done',
-    })
-  }
-  for (const result of message.tool_results || []) {
-    const id = String(result?.call_id || '')
-    if (!id) continue
-    const previous = byId.get(id)
-    byId.set(id, {
-      call_id: id,
-      tool: String(result.tool || previous?.tool || 'ferramenta'),
-      args: previous?.args,
-      context: previous?.context || null,
-      result: pretty(result.result),
-      is_error: Boolean(result.is_error),
-      duration_s: result.duration_s ?? null,
-      status: 'done',
-    })
-  }
-  return Array.from(byId.values())
-}
-
-function runLabel(run: Run | null, liveStatus: string | null, connection: ConnectionState): string {
-  if (run && isActive(run.status)) {
-    if (liveStatus) return liveStatus
-    if (connection === 'reconnecting') return 'Reconectando…'
-    if (run.status === 'waiting_approval') return 'Aguardando aprovação'
-    if (run.status === 'queued') return 'Na fila do agente'
-    return 'Executando agente...'
-  }
-  if (run?.status === 'failed') return 'A execução falhou'
-  if (run?.status === 'cancelled' || run?.status === 'interrupted') return 'Execução interrompida'
-  if (run?.status === 'completed') return 'Concluída'
-  return ''
+function TelemetryRow({ label, value, ok }: { label: string; value: string; ok: boolean }) {
+  return (
+    <View style={styles.telemetryRow}>
+      <Text style={styles.telemetryLabel}>{label}</Text>
+      <View style={styles.telemetryValueWrap}>
+        <View
+          style={[
+            styles.telemetryDot,
+            { backgroundColor: ok ? colors.successLight : colors.dangerLight },
+          ]}
+        />
+        <Text
+          style={[
+            styles.telemetryValue,
+            { color: ok ? colors.textSoft : colors.dangerLight },
+          ]}
+          numberOfLines={1}
+        >
+          {value}
+        </Text>
+      </View>
+    </View>
+  )
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#181818' },
-  headerTitle: { fontSize: 20, fontWeight: '700', color: '#ff6b00' },
-  newChatBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#181818', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8 },
-  newChatBtnText: { color: '#fff', fontWeight: '600', fontSize: 14 },
-  messagesContainer: { flex: 1 },
-  messagesList: { padding: 16, paddingBottom: 40 },
-  messageBubble: { maxWidth: '85%', borderRadius: 16, paddingHorizontal: 14, paddingVertical: 10, marginVertical: 4 },
-  userBubble: { backgroundColor: '#ff6b00', alignSelf: 'flex-end', borderBottomRightRadius: 4 },
-  assistantBubble: { backgroundColor: '#181818', alignSelf: 'flex-start', borderBottomLeftRadius: 4, borderWidth: 1, borderColor: '#282828' },
-  toolBubble: { backgroundColor: '#181818', alignSelf: 'flex-start', borderBottomLeftRadius: 4, borderWidth: 1, borderColor: '#3a2a1a' },
-  messageText: { color: '#fff', fontSize: 15, lineHeight: 22 },
-  toolText: { color: '#a8a8a8', fontSize: 13, fontFamily: 'monospace' },
-  inputContainer: { padding: 12, paddingBottom: 20, backgroundColor: '#0a0a0a', borderTopWidth: 1, borderTopColor: '#181818' },
-  inputWrapper: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, backgroundColor: '#181818', borderRadius: 24, paddingHorizontal: 16, paddingVertical: 8, borderWidth: 1, borderColor: '#282828' },
-  textInput: { flex: 1, color: '#fff', fontSize: 16, maxHeight: 120 },
-  sendBtn: { backgroundColor: '#ff6b00', width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
-  stopBtn: { backgroundColor: '#e05600', width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
-  emptyState: { justifyContent: 'center', alignItems: 'center', padding: 24, paddingTop: 80 },
-  emptyIcon: { marginBottom: 16 },
-  emptyTitle: { color: '#fff', fontSize: 18, fontWeight: '600', marginBottom: 8 },
-  emptySubtitle: { color: '#686868', fontSize: 14, textAlign: 'center' },
-  loadingOverlay: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  typingIndicator: { flexDirection: 'row', gap: 4, paddingHorizontal: 16, paddingVertical: 8 },
-  typingDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#ff6b00' },
-  runStatusBar: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 8, backgroundColor: '#181818', borderBottomWidth: 1, borderBottomColor: '#282828' },
-  runStatusText: { color: '#ff6b00', fontSize: 13, fontWeight: '500', flex: 1 },
-  queueBar: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 6, backgroundColor: '#1a1408', borderBottomWidth: 1, borderBottomColor: '#2d2d2d' },
-  queueText: { color: '#ffb829', fontSize: 12, fontWeight: '500' },
-  approvalCard: { marginHorizontal: 16, marginBottom: 8, padding: 12, borderRadius: 12, borderWidth: 1, borderColor: '#6b4e00', backgroundColor: '#241a05' },
-  approvalTitle: { color: '#ffd27a', fontWeight: '700', fontSize: 13, marginBottom: 4 },
-  approvalCommand: { color: '#e8e8e8', fontFamily: 'monospace', fontSize: 12, marginTop: 6, backgroundColor: '#0a0a0a', borderRadius: 8, padding: 8 },
-  approvalDescription: { color: '#bdbdbd', fontSize: 12, marginTop: 4 },
-  approvalButtons: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
-  approvalBtn: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, backgroundColor: '#ff6b00' },
-  approvalBtnDeny: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, backgroundColor: '#7f1d1d' },
-  approvalBtnText: { color: '#fff', fontWeight: '600', fontSize: 12 },
-  approvalError: { color: '#fca5a5', fontSize: 12, marginTop: 6 },
-  liveToolRow: { marginTop: 8, padding: 8, borderRadius: 8, backgroundColor: '#101010', borderWidth: 1, borderColor: '#282828' },
-  liveToolHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  liveToolName: { color: '#d4d4d4', fontFamily: 'monospace', fontSize: 12, flex: 1 },
-  liveToolResult: { color: '#9a9a9a', fontFamily: 'monospace', fontSize: 11, marginTop: 4, maxHeight: 80 },
-  liveStatus: { color: '#9a9a9a', fontSize: 13, marginTop: 6 },
-  liveCursor: { color: '#8052ff', fontSize: 15 },
-  statusDot: { width: 8, height: 8, borderRadius: 4 },
-  elapsed: { color: '#757575', fontSize: 12, marginLeft: 4 },
+  content: {
+    paddingHorizontal: spacing.lg,
+  },
+  section: {
+    marginBottom: spacing.lg,
+  },
+  heroWrap: {
+    alignItems: 'center',
+    marginBottom: spacing.xl,
+    marginTop: -spacing.xs,
+  },
+  heroCopy: {
+    alignItems: 'center',
+    marginTop: spacing.xs,
+  },
+  heroEyebrow: {
+    fontFamily: fonts.monoBold,
+    fontSize: 9,
+    letterSpacing: 2.6,
+    color: colors.primaryLight,
+    marginBottom: 4,
+  },
+  heroTitle: {
+    fontFamily: fonts.bold,
+    fontSize: 22,
+    letterSpacing: -0.6,
+    color: colors.text,
+  },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: spacing.xs,
+  },
+  statusDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+  },
+  statusText: {
+    fontFamily: fonts.mono,
+    fontSize: 10,
+    letterSpacing: 0.4,
+    color: colors.muted,
+  },
+  sectionHint: {
+    fontFamily: fonts.mono,
+    fontSize: 8,
+    letterSpacing: 0.8,
+    color: colors.faint,
+    textTransform: 'uppercase',
+  },
+  commandShell: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: spacing.sm,
+    paddingLeft: spacing.md,
+    paddingRight: 6,
+    paddingVertical: 6,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: alpha(colors.primary, 0.34),
+    backgroundColor: alpha(colors.surface, 0.92),
+    shadowColor: colors.primary,
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 6,
+  },
+  commandInput: {
+    flex: 1,
+    minHeight: 40,
+    maxHeight: 110,
+    paddingVertical: 9,
+    fontFamily: fonts.regular,
+    fontSize: 13,
+    lineHeight: 19,
+    color: colors.text,
+  },
+  sendButton: {
+    width: 42,
+    height: 42,
+    borderRadius: radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.primary,
+    shadowColor: colors.primary,
+    shadowOpacity: 0.45,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 6,
+  },
+  sendButtonDisabled: {
+    opacity: 0.38,
+  },
+  errorRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 6,
+    marginTop: spacing.xs,
+    paddingHorizontal: 4,
+  },
+  errorText: {
+    flex: 1,
+    fontFamily: fonts.regular,
+    fontSize: 11,
+    lineHeight: 16,
+    color: colors.dangerLight,
+  },
+  statsRow: {
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginBottom: spacing.lg,
+  },
+  linkText: {
+    fontFamily: fonts.monoMedium,
+    fontSize: 9,
+    letterSpacing: 0.8,
+    color: colors.primaryLight,
+    textTransform: 'uppercase',
+  },
+  conversationPress: {
+    alignSelf: 'stretch',
+  },
+  conversationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  conversationRowBorder: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+  },
+  conversationIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: alpha(colors.primary, 0.24),
+    backgroundColor: alpha(colors.primary, 0.08),
+  },
+  conversationCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  conversationTitle: {
+    fontFamily: fonts.medium,
+    fontSize: 13,
+    color: colors.text,
+  },
+  conversationMeta: {
+    fontFamily: fonts.mono,
+    fontSize: 9,
+    color: colors.dim,
+  },
+  runRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  runCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: 3,
+  },
+  runTitle: {
+    fontFamily: fonts.medium,
+    fontSize: 12,
+    color: colors.textSoft,
+  },
+  telemetryGrid: {
+    gap: 2,
+  },
+  telemetryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: alpha(colors.border, 0.7),
+  },
+  telemetryLabel: {
+    fontFamily: fonts.mono,
+    fontSize: 10,
+    letterSpacing: 0.6,
+    color: colors.dim,
+    textTransform: 'uppercase',
+  },
+  telemetryValueWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    maxWidth: '62%',
+  },
+  telemetryDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+  },
+  telemetryValue: {
+    fontFamily: fonts.monoMedium,
+    fontSize: 10,
+    color: colors.textSoft,
+  },
+  telemetryFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
+  },
+  telemetryFooterText: {
+    fontFamily: fonts.mono,
+    fontSize: 8,
+    letterSpacing: 0.4,
+    color: colors.faint,
+  },
+  suggestionList: {
+    gap: spacing.xs,
+  },
+  suggestionPress: {
+    alignSelf: 'stretch',
+  },
+  suggestionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: alpha(colors.surface, 0.7),
+  },
+  suggestionText: {
+    flex: 1,
+    fontFamily: fonts.regular,
+    fontSize: 12,
+    lineHeight: 17,
+    color: colors.textSoft,
+  },
+  footer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingBottom: spacing.xs,
+  },
+  footerText: {
+    fontFamily: fonts.mono,
+    fontSize: 8,
+    letterSpacing: 1.1,
+    color: colors.faint,
+  },
+  alertPanel: {
+    borderColor: alpha(colors.warning, 0.35),
+    backgroundColor: alpha(colors.warning, 0.06),
+  },
+  alertRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  alertIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: alpha(colors.warning, 0.32),
+    backgroundColor: alpha(colors.warning, 0.1),
+  },
+  alertCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  alertTitle: {
+    fontFamily: fonts.monoBold,
+    fontSize: 9,
+    letterSpacing: 1,
+    color: colors.warningLight,
+    textTransform: 'uppercase',
+  },
+  alertText: {
+    fontFamily: fonts.regular,
+    fontSize: 11,
+    lineHeight: 16,
+    color: colors.textSoft,
+  },
+  approvalList: {
+    marginTop: spacing.sm,
+    gap: spacing.xs,
+  },
+  approvalItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingTop: spacing.xs,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: alpha(colors.warning, 0.2),
+  },
+  approvalInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  approvalOperation: {
+    fontFamily: fonts.monoMedium,
+    fontSize: 10,
+    color: colors.text,
+  },
+  approvalMeta: {
+    fontFamily: fonts.mono,
+    fontSize: 8,
+    color: colors.dim,
+    marginTop: 2,
+  },
+  approvalActions: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  approvalAction: {
+    width: 32,
+    height: 32,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: alpha(colors.danger, 0.34),
+    backgroundColor: alpha(colors.danger, 0.1),
+  },
+  approvalActionPrimary: {
+    borderColor: alpha(colors.primary, 0.4),
+    backgroundColor: colors.primary,
+  },
 })
-
-export default function ChatScreen() {
-  const params = useLocalSearchParams<{ conversationId?: string }>()
-  const { user } = useAuth()
-
-  const [conversations, setConversations] = useState<Conversation[]>([])
-  const [currentConversation, setCurrentConversation] = useState<Conversation | null>(null)
-  const [messages, setMessages] = useState<Message[]>([])
-  const [loading, setLoading] = useState(true)
-  const [sending, setSending] = useState(false)
-  const [run, setRun] = useState<Run | null>(null)
-  const [liveText, setLiveText] = useState('')
-  const [liveTools, setLiveTools] = useState<ToolActivity[]>([])
-  const [liveStatus, setLiveStatus] = useState<string | null>(null)
-  const [approval, setApproval] = useState<ApprovalCard | null>(null)
-  const [approvalBusy, setApprovalBusy] = useState(false)
-  const [approvalError, setApprovalError] = useState<string | null>(null)
-  const [queuedCount, setQueuedCount] = useState(0)
-  const [connection, setConnection] = useState<ConnectionState>('idle')
-  const [elapsed, setElapsed] = useState(0)
-  const [inputValue, setInputValue] = useState('')
-  const [showConversationPicker, setShowConversationPicker] = useState(false)
-
-  const scrollRef = useRef<ScrollView>(null)
-  const mountedRef = useRef(true)
-  const currentConversationRef = useRef<Conversation | null>(null)
-  const runRef = useRef<Run | null>(null)
-  const openedConversationRef = useRef<string | null>(null)
-  const finishTokenRef = useRef(0)
-  const handleEventRef = useRef<(event: RunEvent) => void>(() => {})
-  const openWsRef = useRef<() => void>(() => {})
-
-  const wsRef = useRef<{
-    socket: WebSocket | null
-    runId: string | null
-    conversationId: string | null
-    lastSeq: number
-    terminated: boolean
-    retries: number
-    timer: ReturnType<typeof setTimeout> | null
-  }>({
-    socket: null,
-    runId: null,
-    conversationId: null,
-    lastSeq: 0,
-    terminated: false,
-    retries: 0,
-    timer: null,
-  })
-
-  useEffect(() => {
-    currentConversationRef.current = currentConversation
-  }, [currentConversation])
-
-  useEffect(() => {
-    runRef.current = run
-  }, [run])
-
-  useEffect(() => {
-    if (currentConversation?.id) {
-      openedConversationRef.current = currentConversation.id
-    }
-  }, [currentConversation?.id])
-
-  const runActive = Boolean(run && isActive(run.status))
-
-  const closeWs = useCallback(() => {
-    const stream = wsRef.current
-    stream.terminated = true
-    stream.runId = null
-    stream.lastSeq = 0
-    stream.retries = 0
-    if (stream.timer) {
-      clearTimeout(stream.timer)
-      stream.timer = null
-    }
-    if (stream.socket) {
-      const socket = stream.socket
-      stream.socket = null
-      try {
-        socket.close()
-      } catch {
-        // Already closed.
-      }
-    }
-    if (mountedRef.current) setConnection('idle')
-  }, [])
-
-  const loadPendingApproval = useCallback(async (runId: string) => {
-    try {
-      const data = await api.listApprovals('pending', runId)
-      const record = data?.items?.[0] as Approval | undefined
-      if (record) setApproval(approvalFromRecord(record))
-    } catch {
-      // Live event is the primary path.
-    }
-  }, [])
-
-  const openWs = useCallback(() => {
-    const stream = wsRef.current
-    if (!stream.runId || stream.terminated) return
-
-    setConnection(stream.retries > 0 ? 'reconnecting' : 'connecting')
-    const socket = new WebSocket(api.createRunWebSocketUrl(stream.runId, stream.lastSeq))
-    stream.socket = socket
-
-    socket.onopen = () => {
-      if (wsRef.current.socket !== socket) return
-      stream.retries = 0
-      setConnection('live')
-    }
-
-    socket.onmessage = (messageEvent) => {
-      if (wsRef.current.socket !== socket) return
-      try {
-        const event = JSON.parse(String(messageEvent.data)) as RunEvent
-        if (event.type === 'heartbeat') return
-        stream.lastSeq = Math.max(stream.lastSeq, Number(event.seq) || 0)
-        handleEventRef.current(event)
-      } catch {
-        // Ignore malformed frames.
-      }
-    }
-
-    socket.onerror = () => {
-      // onclose handles reconnection.
-    }
-
-    socket.onclose = () => {
-      if (wsRef.current.socket !== socket || stream.terminated) return
-      stream.socket = null
-      if (stream.retries >= 6) {
-        setConnection('idle')
-        return
-      }
-      stream.retries += 1
-      setConnection('reconnecting')
-      const wait = Math.min(1000 * 2 ** (stream.retries - 1), 8000)
-      stream.timer = setTimeout(() => {
-        stream.timer = null
-        openWsRef.current()
-      }, wait)
-    }
-  }, [])
-
-  useEffect(() => {
-    openWsRef.current = openWs
-  }, [openWs])
-
-  const attachRun = useCallback(
-    (nextRun: Run) => {
-      const stream = wsRef.current
-      if (stream.runId === nextRun.id && stream.socket) return
-
-      closeWs()
-      setRun(nextRun)
-      runRef.current = nextRun
-      setLiveText('')
-      setLiveTools([])
-      setLiveStatus(null)
-      setApproval(null)
-      setApprovalError(null)
-
-      stream.conversationId = nextRun.conversation_id
-      if (!isActive(nextRun.status)) return
-
-      stream.runId = nextRun.id
-      stream.lastSeq = 0
-      stream.terminated = false
-      stream.retries = 0
-      openWs()
-
-      if (nextRun.status === 'waiting_approval') {
-        void loadPendingApproval(nextRun.id)
-      }
-    },
-    [closeWs, loadPendingApproval, openWs],
-  )
-
-  const finishRun = useCallback(
-    async (runId: string, status: string, result?: string | null, error?: string | null) => {
-      const stream = wsRef.current
-      if (stream.terminated) return
-      if (stream.runId && runId && stream.runId !== runId) return
-
-      stream.terminated = true
-      if (stream.timer) {
-        clearTimeout(stream.timer)
-        stream.timer = null
-      }
-      if (stream.socket) {
-        const socket = stream.socket
-        stream.socket = null
-        try {
-          socket.close()
-        } catch {
-          // Already closed.
-        }
-      }
-      stream.runId = null
-      setConnection('idle')
-      setLiveStatus(null)
-      // The run is over, so any pending approval is no longer actionable.
-      setApproval(null)
-      setApprovalError(null)
-      setRun((previous) =>
-        previous && previous.id === runId
-          ? {
-              ...previous,
-              status: status as Run['status'],
-              completed_at: new Date().toISOString(),
-              result_summary: result ?? previous.result_summary,
-              error: error ?? null,
-            }
-          : previous,
-      )
-
-      const conversationId = stream.conversationId
-      if (!conversationId) return
-      const token = ++finishTokenRef.current
-
-      for (let attempt = 0; attempt < 5; attempt += 1) {
-        await delay(attempt === 0 ? 150 : 300)
-        if (!mountedRef.current || finishTokenRef.current !== token) return
-        try {
-          const [messageData, activeRun] = await Promise.all([
-            api.listMessages(conversationId, { page_size: 200 }),
-            api.getActiveRun(conversationId),
-          ])
-          if (!mountedRef.current || finishTokenRef.current !== token) return
-          if (activeRun && activeRun.id !== runId) {
-            setMessages(messageData.items as Message[])
-            setLiveText('')
-            setLiveTools([])
-            attachRun(activeRun as Run)
-            const queued = (await api.listRuns({
-              conversation_id: conversationId,
-              status: 'queued',
-              page_size: 50,
-            })) as Run[]
-            if (mountedRef.current && finishTokenRef.current === token) {
-              setQueuedCount(queued.length)
-            }
-            return
-          }
-          if (!activeRun) {
-            setMessages(messageData.items as Message[])
-            setLiveText('')
-            setLiveTools([])
-            const queued = (await api.listRuns({
-              conversation_id: conversationId,
-              status: 'queued',
-              page_size: 50,
-            })) as Run[]
-            if (mountedRef.current && finishTokenRef.current === token) {
-              setQueuedCount(queued.length)
-            }
-            return
-          }
-        } catch {
-          // Retry until the fallback below.
-        }
-      }
-
-      if (!mountedRef.current || finishTokenRef.current !== token) return
-      try {
-        const messageData = await api.listMessages(conversationId, { page_size: 200 })
-        if (mountedRef.current && finishTokenRef.current === token) {
-          setMessages(messageData.items as Message[])
-          setLiveText('')
-          setLiveTools([])
-        }
-      } catch {
-        // Keep live text as a fallback.
-      }
-    },
-    [attachRun],
-  )
-
-  const handleEvent = (event: RunEvent) => {
-    const data = (event.data || {}) as Record<string, any>
-    const eventRunId = event.run_id || wsRef.current.runId || ''
-
-    switch (event.type) {
-      case 'run_queued':
-        setRun((previous) => (previous ? { ...previous, status: 'queued' } : previous))
-        setLiveStatus(
-          Number(data.position) > 0 ? `Na fila (${Number(data.position)}º)` : 'Na fila',
-        )
-        break
-
-      case 'run_started':
-        setRun((previous) => (previous ? { ...previous, status: 'running' } : previous))
-        setLiveStatus('Conectando ao agente…')
-        break
-
-      case 'message_start':
-        setLiveStatus(null)
-        break
-
-      case 'token':
-        if (typeof data.delta === 'string' && data.delta) {
-          setLiveText((previous) => previous + data.delta)
-          setLiveStatus(null)
-        }
-        break
-
-      case 'reasoning':
-        setLiveStatus('Raciocinando…')
-        break
-
-      case 'status':
-        if (typeof data.text === 'string' && data.text) setLiveStatus(data.text)
-        break
-
-      case 'title': {
-        const title = typeof data.title === 'string' ? data.title : ''
-        if (!title) break
-        setConversations((previous) =>
-          previous.map((conversation) =>
-            conversation.id === (data.conversation_id || wsRef.current.conversationId)
-              ? { ...conversation, title }
-              : conversation,
-          ),
-        )
-        setCurrentConversation((previous) => (previous ? { ...previous, title } : previous))
-        break
-      }
-
-      case 'tool_call':
-        setLiveTools((previous) => upsertTool(previous, data))
-        setLiveStatus(`Executando ${String(data.tool || 'ferramenta')}…`)
-        break
-
-      case 'tool_result':
-        setLiveTools((previous) => completeTool(previous, data))
-        setLiveStatus(null)
-        break
-
-      case 'approval_requested': {
-        const card = approvalFromEvent(data)
-        if (!card.approval_id) break
-        setApproval(card)
-        setApprovalError(null)
-        setRun((previous) => (previous ? { ...previous, status: 'waiting_approval' } : previous))
-        setLiveStatus('Aguardando sua aprovação')
-        break
-      }
-
-      case 'approval_resolved':
-        setApproval(null)
-        setRun((previous) => (previous ? { ...previous, status: 'running' } : previous))
-        setLiveStatus('Aprovação enviada')
-        break
-
-      case 'approval_cancelled':
-        setApproval(null)
-        setRun((previous) => (previous ? { ...previous, status: 'running' } : previous))
-        setLiveStatus('Aprovação cancelada')
-        break
-
-      case 'run_stopping':
-        setLiveStatus(typeof data.reason === 'string' ? data.reason : 'Interrompendo…')
-        break
-
-      case 'run_completed':
-        void finishRun(
-          eventRunId,
-          'completed',
-          typeof data.result === 'string' ? data.result : null,
-          null,
-        )
-        break
-
-      case 'run_failed':
-        void finishRun(
-          eventRunId,
-          'failed',
-          typeof data.result === 'string' ? data.result : null,
-          typeof data.error === 'string' ? data.error : 'A execução falhou.',
-        )
-        break
-
-      case 'run_cancelled':
-        void finishRun(
-          eventRunId,
-          'cancelled',
-          typeof data.result === 'string' ? data.result : null,
-          typeof data.reason === 'string' ? data.reason : null,
-        )
-        break
-
-      case 'run_snapshot': {
-        const status = String(data.status || '')
-        if (!data.active || TERMINAL_STATUSES.includes(status)) {
-          void finishRun(
-            eventRunId,
-            TERMINAL_STATUSES.includes(status) ? status : 'failed',
-            typeof data.result_summary === 'string' ? data.result_summary : null,
-            typeof data.error === 'string' ? data.error : null,
-          )
-        }
-        break
-      }
-
-      case 'error':
-        if (typeof data.error === 'string') setLiveStatus(data.error)
-        break
-    }
-  }
-
-  useEffect(() => {
-    handleEventRef.current = handleEvent
-  })
-
-  const loadConversations = useCallback(async () => {
-    try {
-      const data = await api.listConversations({ page_size: 100 })
-      if (mountedRef.current) setConversations(data.items as Conversation[])
-    } catch (error: any) {
-      if (mountedRef.current) {
-        Alert.alert('Erro', error?.response?.data?.detail || 'Erro ao carregar conversas')
-      }
-    } finally {
-      if (mountedRef.current) setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    void loadConversations()
-  }, [loadConversations])
-
-  useEffect(() => {
-    mountedRef.current = true
-    return () => {
-      mountedRef.current = false
-      closeWs()
-    }
-  }, [closeWs])
-
-  const resetRunState = useCallback(() => {
-    ++finishTokenRef.current
-    closeWs()
-    setRun(null)
-    runRef.current = null
-    setLiveText('')
-    setLiveTools([])
-    setLiveStatus(null)
-    setApproval(null)
-    setApprovalError(null)
-    setQueuedCount(0)
-    setElapsed(0)
-  }, [closeWs])
-
-  const openConversation = useCallback(
-    async (conversation: Conversation) => {
-      resetRunState()
-      setCurrentConversation(conversation)
-      currentConversationRef.current = conversation
-      setMessages([])
-
-      try {
-        const [messageData, activeRun, queued] = await Promise.all([
-          api.listMessages(conversation.id, { page_size: 200 }),
-          api.getActiveRun(conversation.id),
-          api.listRuns({ conversation_id: conversation.id, status: 'queued', page_size: 50 }),
-        ])
-        if (!mountedRef.current) return
-        setMessages(messageData.items as Message[])
-        setQueuedCount((queued as Run[]).length)
-        if (activeRun) attachRun(activeRun as Run)
-      } catch (error: any) {
-        if (mountedRef.current) {
-          Alert.alert('Erro', error?.response?.data?.detail || 'Erro ao carregar conversa')
-        }
-      }
-    },
-    [attachRun, resetRunState],
-  )
-
-  // Deep link support: ?conversationId=...
-  useEffect(() => {
-    const id = params.conversationId
-    if (!id || openedConversationRef.current === id) return
-    const known = conversations.find((conversation) => conversation.id === id)
-    if (known) {
-      openedConversationRef.current = id
-      void openConversation(known)
-      return
-    }
-    openedConversationRef.current = id
-    api
-      .getConversation(id)
-      .then((conversation: Conversation) => {
-        if (!mountedRef.current) return
-        setConversations((previous) =>
-          previous.some((item) => item.id === conversation.id)
-            ? previous
-            : [conversation, ...previous],
-        )
-        void openConversation(conversation)
-      })
-      .catch(() => {
-        openedConversationRef.current = null
-      })
-  }, [params.conversationId, conversations, openConversation])
-
-  useEffect(() => {
-    if (messages.length > 0 || liveText) {
-      scrollRef.current?.scrollToEnd({ animated: true })
-    }
-  }, [messages, liveText, liveTools, approval])
-
-  useEffect(() => {
-    if (!runActive) {
-      setElapsed(0)
-      return
-    }
-    const started = Date.now()
-    setElapsed(0)
-    const timer = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - started) / 1000))
-    }, 1000)
-    return () => clearInterval(timer)
-  }, [runActive, run?.id])
-
-  const handleNewChat = () => {
-    resetRunState()
-    setCurrentConversation(null)
-    currentConversationRef.current = null
-    openedConversationRef.current = null
-    setMessages([])
-    setInputValue('')
-    setShowConversationPicker(false)
-  }
-
-  const selectConversation = (conversation: Conversation) => {
-    openedConversationRef.current = conversation.id
-    setShowConversationPicker(false)
-    void openConversation(conversation)
-  }
-
-  const sendMessage = async (content: string) => {
-    const text = content.trim()
-    if (!text || sending) return
-
-    setSending(true)
-    let conversation = currentConversationRef.current
-    const wasActive = Boolean(runRef.current && isActive(runRef.current.status))
-    const tempId = `temp_${Date.now()}`
-
-    try {
-      if (!conversation) {
-        const created = (await api.createConversation({})) as Conversation
-        conversation = { ...created, message_count: 0 }
-        setConversations((previous) => [conversation!, ...previous])
-        setCurrentConversation(conversation)
-        currentConversationRef.current = conversation
-        openedConversationRef.current = conversation.id
-      }
-
-      setMessages((previous) => [
-        ...previous,
-        {
-          id: tempId,
-          conversation_id: conversation!.id,
-          role: 'user',
-          content: text,
-          created_at: new Date().toISOString(),
-          run_id: null,
-        } as Message,
-      ])
-      setInputValue('')
-
-      if (!conversation.title) {
-        const title = text.slice(0, 80)
-        conversation = { ...conversation, title }
-        setCurrentConversation(conversation)
-        currentConversationRef.current = conversation
-        setConversations((previous) =>
-          previous.map((item) => (item.id === conversation!.id ? { ...item, title } : item)),
-        )
-      }
-
-      const newRun = (await api.createRun(conversation.id, { message: text })) as Run
-      if (wasActive) {
-        setQueuedCount((previous) => previous + 1)
-        setLiveStatus('Mensagem na fila do agente')
-      } else {
-        attachRun(newRun)
-      }
-
-      const messageData = await api.listMessages(conversation.id, { page_size: 200 })
-      if (mountedRef.current) setMessages(messageData.items as Message[])
-    } catch (error: any) {
-      if (mountedRef.current) {
-        setMessages((previous) => previous.filter((message) => message.id !== tempId))
-        Alert.alert('Erro', error?.response?.data?.detail || 'Erro ao enviar mensagem')
-      }
-    } finally {
-      if (mountedRef.current) setSending(false)
-    }
-  }
-
-  const stopRun = async () => {
-    if (!run || !isActive(run.status)) return
-    setLiveStatus('Interrompendo…')
-    try {
-      await api.stopRun(run.id)
-    } catch (error: any) {
-      Alert.alert('Erro', error?.response?.data?.detail || 'Erro ao parar execução')
-      setLiveStatus(null)
-    }
-  }
-
-  const resolveApproval = async (choice: string) => {
-    if (!approval || approvalBusy) return
-    setApprovalBusy(true)
-    setApprovalError(null)
-    try {
-      if (choice === 'deny') await api.deny(approval.approval_id, choice)
-      else await api.approve(approval.approval_id, choice)
-      setApproval(null)
-      setLiveStatus('Aprovação enviada')
-    } catch (error: any) {
-      setApprovalError(error?.response?.data?.detail || 'Falha ao responder ao Hermes')
-    } finally {
-      if (mountedRef.current) setApprovalBusy(false)
-    }
-  }
-
-  const renderMessage = (message: Message) => {
-    const isUser = message.role === 'user'
-    const tools = message.role === 'assistant' ? mergedTools(message) : []
-
-    if (message.role === 'assistant' && !message.content.trim() && tools.length === 0) {
-      return null
-    }
-
-    return (
-      <View key={message.id} style={[styles.messageBubble, isUser ? styles.userBubble : styles.assistantBubble]}>
-        {tools.map((tool) => (
-          <View key={tool.call_id} style={styles.liveToolRow}>
-            <View style={styles.liveToolHeader}>
-              <Ionicons
-                name={tool.is_error ? 'close-circle' : 'terminal'}
-                size={14}
-                color={tool.is_error ? '#ef4444' : '#ff6b00'}
-              />
-              <Text style={styles.liveToolName}>{tool.tool}</Text>
-              {typeof tool.duration_s === 'number' && (
-                <Text style={styles.liveStatus}>{tool.duration_s.toFixed(1)}s</Text>
-              )}
-            </View>
-            {tool.result ? <Text style={styles.liveToolResult} numberOfLines={6}>{tool.result}</Text> : null}
-          </View>
-        ))}
-        {message.content ? <Text style={styles.messageText}>{message.content}</Text> : null}
-      </View>
-    )
-  }
-
-  if (loading && conversations.length === 0) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.loadingOverlay}>
-          <ActivityIndicator size="large" color="#ff6b00" />
-        </View>
-      </SafeAreaView>
-    )
-  }
-
-  return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <View style={{ flex: 1, marginRight: 12 }}>
-          <Text style={styles.headerTitle} numberOfLines={1}>
-            {currentConversation?.title || 'ODIN V2'}
-          </Text>
-          {user?.email ? (
-            <Text style={{ color: '#686868', fontSize: 11 }} numberOfLines={1}>
-              {user.email}
-            </Text>
-          ) : null}
-        </View>
-        <TouchableOpacity
-          onPress={() => setShowConversationPicker(true)}
-          style={styles.newChatBtn}
-          accessibilityLabel="Conversas"
-        >
-          <Ionicons name="chatbubbles-outline" size={20} color="#fff" />
-        </TouchableOpacity>
-        <TouchableOpacity onPress={handleNewChat} style={styles.newChatBtn}>
-          <Ionicons name="add" size={20} color="#fff" />
-          <Text style={styles.newChatBtnText}>Nova</Text>
-        </TouchableOpacity>
-      </View>
-
-      {run && isActive(run.status) && (
-        <View style={styles.runStatusBar}>
-          <View
-            style={[
-              styles.statusDot,
-              {
-                backgroundColor:
-                  connection === 'live' ? '#15846e' : connection === 'reconnecting' ? '#ffb829' : '#8052ff',
-              },
-            ]}
-          />
-          <Text style={styles.runStatusText} numberOfLines={1}>
-            {runLabel(run, liveStatus, connection)}
-          </Text>
-          <Text style={styles.elapsed}>{elapsed}s</Text>
-          <TouchableOpacity onPress={stopRun} style={styles.stopBtn} accessibilityLabel="Parar execução">
-            <Ionicons name="square" size={14} color="#fff" />
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {queuedCount > 0 && (
-        <View style={styles.queueBar}>
-          <Ionicons name="time" size={14} color="#ffb829" />
-          <Text style={styles.queueText}>
-            {queuedCount} mensagem{queuedCount > 1 ? 's' : ''} na fila
-          </Text>
-        </View>
-      )}
-
-      {approval && (
-        <View style={styles.approvalCard}>
-          <Text style={styles.approvalTitle}>Aprovação necessária · {approval.operation}</Text>
-          {approval.description ? (
-            <Text style={styles.approvalDescription}>{approval.description}</Text>
-          ) : null}
-          {approval.command ? (
-            <Text style={styles.approvalCommand} numberOfLines={8}>
-              {approval.command}
-            </Text>
-          ) : null}
-          {approvalError ? <Text style={styles.approvalError}>{approvalError}</Text> : null}
-          <View style={styles.approvalButtons}>
-            {approval.choices.map((choice) => (
-              <TouchableOpacity
-                key={choice}
-                onPress={() => resolveApproval(choice)}
-                disabled={approvalBusy}
-                style={choice === 'deny' ? styles.approvalBtnDeny : styles.approvalBtn}
-              >
-                <Text style={styles.approvalBtnText}>
-                  {approvalBusy ? '…' : choiceLabel(choice)}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-      )}
-
-      <ScrollView
-        ref={scrollRef}
-        style={styles.messagesContainer}
-        contentContainerStyle={styles.messagesList}
-        showsVerticalScrollIndicator={false}
-      >
-        {messages.length === 0 && !currentConversation && (
-          <View style={styles.emptyState}>
-            <Ionicons name="chatbubbles-outline" size={64} color="#282828" style={styles.emptyIcon} />
-            <Text style={styles.emptyTitle}>Bem-vindo ao ODIN V2</Text>
-            <Text style={styles.emptySubtitle}>
-              Converse com o Hermes em tempo real, com ferramentas e aprovações inline
-            </Text>
-          </View>
-        )}
-
-        {messages.length === 0 && currentConversation && !runActive && (
-          <View style={styles.emptyState}>
-            <Ionicons name="chatbubbles-outline" size={48} color="#282828" style={styles.emptyIcon} />
-            <Text style={styles.emptyTitle}>Nenhuma mensagem</Text>
-            <Text style={styles.emptySubtitle}>Envie a primeira mensagem para começar</Text>
-          </View>
-        )}
-
-        {messages.map(renderMessage)}
-
-        {runActive && (
-          <View style={[styles.messageBubble, styles.assistantBubble]}>
-            {liveTools.map((tool) => (
-              <View key={tool.call_id} style={styles.liveToolRow}>
-                <View style={styles.liveToolHeader}>
-                  {tool.status === 'running' ? (
-                    <ActivityIndicator size="small" color="#ff6b00" />
-                  ) : (
-                    <Ionicons
-                      name={tool.is_error ? 'close-circle' : 'checkmark-circle'}
-                      size={14}
-                      color={tool.is_error ? '#ef4444' : '#15846e'}
-                    />
-                  )}
-                  <Text style={styles.liveToolName}>{tool.tool}</Text>
-                </View>
-                {tool.result ? (
-                  <Text style={styles.liveToolResult} numberOfLines={5}>
-                    {tool.result}
-                  </Text>
-                ) : null}
-              </View>
-            ))}
-
-            {liveText ? (
-              <Text style={styles.messageText}>
-                {liveText}
-                <Text style={styles.liveCursor}> ▍</Text>
-              </Text>
-            ) : (
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <ActivityIndicator size="small" color="#ff6b00" />
-                <Text style={styles.liveStatus}>{liveStatus || 'Pensando…'}</Text>
-              </View>
-            )}
-
-            {liveText && liveStatus ? <Text style={styles.liveStatus}>{liveStatus}</Text> : null}
-          </View>
-        )}
-
-        {run && !runActive && run.status === 'failed' && run.error ? (
-          <View style={[styles.messageBubble, styles.assistantBubble, { borderColor: '#7f1d1d' }]}>
-            <Text style={{ color: '#fca5a5', fontSize: 13 }}>{run.error}</Text>
-          </View>
-        ) : null}
-      </ScrollView>
-
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.inputContainer}
-        keyboardVerticalOffset={0}
-      >
-        <View style={styles.inputWrapper}>
-          <TextInput
-            style={styles.textInput}
-            value={inputValue}
-            onChangeText={setInputValue}
-            placeholder={runActive ? 'Enviar outra mensagem — entra na fila…' : 'Digite sua mensagem...'}
-            placeholderTextColor="#686868"
-            multiline
-            maxLength={4000}
-            editable={!sending}
-            onSubmitEditing={() => sendMessage(inputValue)}
-          />
-          <TouchableOpacity
-            onPress={() => sendMessage(inputValue)}
-            style={[styles.sendBtn, (!inputValue.trim() || sending) && { opacity: 0.5 }]}
-            disabled={!inputValue.trim() || sending}
-            accessibilityLabel="Enviar mensagem"
-          >
-            {sending ? (
-              <ActivityIndicator size="small" color="#fff" />
-            ) : (
-              <Ionicons name="send" size={20} color="#fff" />
-            )}
-          </TouchableOpacity>
-        </View>
-      </KeyboardAvoidingView>
-
-      {showConversationPicker && (
-        <View style={StyleSheet.absoluteFill}>
-          <TouchableOpacity
-            onPress={() => setShowConversationPicker(false)}
-            style={StyleSheet.absoluteFill}
-          />
-          <View
-            style={{
-              position: 'absolute',
-              bottom: 0,
-              left: 0,
-              right: 0,
-              backgroundColor: '#0a0a0a',
-              borderTopLeftRadius: 20,
-              borderTopRightRadius: 20,
-              maxHeight: 420,
-            }}
-          >
-            <View
-              style={{
-                padding: 16,
-                borderBottomWidth: 1,
-                borderBottomColor: '#282828',
-                flexDirection: 'row',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-              }}
-            >
-              <Text style={{ color: '#fff', fontSize: 18, fontWeight: '600' }}>Conversas</Text>
-              <TouchableOpacity onPress={() => setShowConversationPicker(false)}>
-                <Ionicons name="close" size={24} color="#686868" />
-              </TouchableOpacity>
-            </View>
-            <FlatList
-              data={conversations}
-              keyExtractor={(item) => item.id}
-              ListHeaderComponent={
-                <TouchableOpacity
-                  onPress={handleNewChat}
-                  style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: '#181818' }}
-                >
-                  <Text style={{ color: '#ff6b00', fontSize: 16, fontWeight: '600' }}>
-                    + Nova conversa
-                  </Text>
-                </TouchableOpacity>
-              }
-              ListEmptyComponent={
-                <Text style={{ color: '#686868', padding: 16 }}>Nenhuma conversa ainda.</Text>
-              }
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  onPress={() => selectConversation(item)}
-                  style={{ padding: 16, borderBottomWidth: 1, borderBottomColor: '#181818' }}
-                >
-                  <Text style={{ color: '#fff', fontSize: 16 }}>
-                    {item.title || `Conversa ${item.id.slice(0, 8)}`}
-                  </Text>
-                  <Text style={{ color: '#686868', fontSize: 12, marginTop: 4 }}>
-                    {item.message_count} mensagens
-                  </Text>
-                </TouchableOpacity>
-              )}
-            />
-          </View>
-        </View>
-      )}
-    </SafeAreaView>
-  )
-}
