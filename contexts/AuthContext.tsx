@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react'
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import { api, type User } from '../lib/api'
 
 interface AuthContextType {
@@ -17,7 +17,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const refreshUser = useCallback(async () => {
     const token = api.getToken()
-    if (!token) {
+    if (!token && !api.getRefreshToken()) {
       setUser(null)
       setLoading(false)
       return
@@ -27,7 +27,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const userData = await api.getMe()
       setUser(userData)
     } catch {
-      api.clearToken()
+      await api.clearTokens()
       setUser(null)
     } finally {
       setLoading(false)
@@ -35,23 +35,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   useEffect(() => {
+    api.setUnauthorizedHandler(() => setUser(null))
     const init = async () => {
       await api.initialize()
       await refreshUser()
     }
-    init()
+    void init()
+    return () => api.setUnauthorizedHandler(null)
   }, [refreshUser])
 
-  const login = async (email: string, password: string) => {
+  const login = useCallback(async (email: string, password: string) => {
     await api.login(email, password)
-    await refreshUser()
-  }
+    const userData = await api.getMe()
+    setUser(userData)
+  }, [])
 
-  const logout = async () => {
-    await api.logout()
-    await api.clearToken()
-    setUser(null)
-  }
+  const logout = useCallback(async () => {
+    try {
+      await api.logout()
+    } finally {
+      setUser(null)
+      setLoading(false)
+    }
+  }, [])
 
   return (
     <AuthContext.Provider value={{ user, loading, login, logout, refreshUser }}>
@@ -62,8 +68,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
 export function useAuth() {
   const context = useContext(AuthContext)
-  if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider')
-  }
+  if (!context) throw new Error('useAuth must be used within an AuthProvider')
   return context
 }
