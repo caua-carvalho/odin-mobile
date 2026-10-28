@@ -26,7 +26,7 @@ import {
   Panel,
   PressableScale,
 } from '../../components/hud/primitives'
-import { useKeyboardVisible } from '../../hooks/useKeyboardVisible'
+
 import { useOdinStatus } from '../../contexts/OdinStatusContext'
 import { MarkdownMessage } from '../../components/chat/MarkdownMessage'
 import {
@@ -214,7 +214,7 @@ export default function ChatScreen() {
   const params = useLocalSearchParams<{ conversationId?: string | string[] }>()
   const router = useRouter()
   const insets = useSafeAreaInsets()
-  const keyboardVisible = useKeyboardVisible()
+
   const { refresh: refreshStatus } = useOdinStatus()
 
   const [conversations, setConversations] = useState<Conversation[]>([])
@@ -981,7 +981,7 @@ export default function ChatScreen() {
   }
 
   const showEmptyState = messages.length === 0 && !runActive && !loadingMessages
-  const bottomSpace = keyboardVisible ? Math.max(insets.bottom, 8) : insets.bottom + DOCK_SPACE
+  const bottomSpace = insets.bottom + DOCK_SPACE
 
   return (
     <View style={styles.root}>
@@ -1023,7 +1023,7 @@ export default function ChatScreen() {
 
       <KeyboardAvoidingView
         style={styles.flex}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior="padding"
         keyboardVerticalOffset={0}
       >
         {runActive ? (
