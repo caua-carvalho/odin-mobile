@@ -1,68 +1,31 @@
-import { useAuth } from '../../contexts/AuthContext'
+import React from 'react'
 import { Redirect } from 'expo-router'
-import { Tabs } from 'expo-router'
-import { Ionicons } from '@expo/vector-icons'
+import { Tabs } from 'expo-router/js-tabs'
+import { useAuth } from '../../contexts/AuthContext'
+import { HudDock } from '../../components/hud/HudDock'
+import { colors } from '../../lib/theme'
 
 export default function TabsLayout() {
   const { user, loading } = useAuth()
 
-  if (loading) {
-    return null
-  }
-
-  if (!user) {
-    return <Redirect href="/login" />
-  }
+  if (loading) return null
+  if (!user) return <Redirect href="/login" />
 
   return (
     <Tabs
+      backBehavior="history"
+      tabBar={(props) => <HudDock {...props} />}
       screenOptions={{
-        tabBarActiveTintColor: '#ff6b00',
-        tabBarInactiveTintColor: '#686868',
-        tabBarStyle: {
-          backgroundColor: '#0a0a0a',
-          borderTopColor: '#181818',
-          height: 60,
-        },
         headerShown: false,
+        sceneStyle: { backgroundColor: colors.bg },
+        animation: 'fade',
       }}
     >
-      <Tabs.Screen
-        name="index"
-        options={{
-          title: 'Chat',
-          tabBarIcon: ({ focused, color }) => (
-            <Ionicons name={focused ? 'chatbubbles' : 'chatbubbles-outline'} size={24} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="knowledge"
-        options={{
-          title: 'Biblioteca',
-          tabBarIcon: ({ focused, color }) => (
-            <Ionicons name={focused ? 'library' : 'library-outline'} size={24} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="activity"
-        options={{
-          title: 'Atividade',
-          tabBarIcon: ({ focused, color }) => (
-            <Ionicons name={focused ? 'pulse' : 'pulse-outline'} size={24} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="system"
-        options={{
-          title: 'Sistema',
-          tabBarIcon: ({ focused, color }) => (
-            <Ionicons name={focused ? 'settings' : 'settings-outline'} size={24} color={color} />
-          ),
-        }}
-      />
+      <Tabs.Screen name="index" options={{ title: 'Nexus' }} />
+      <Tabs.Screen name="chat" options={{ title: 'Chat' }} />
+      <Tabs.Screen name="knowledge" options={{ title: 'Biblioteca' }} />
+      <Tabs.Screen name="activity" options={{ title: 'Atividade' }} />
+      <Tabs.Screen name="system" options={{ title: 'Telemetria' }} />
     </Tabs>
   )
 }

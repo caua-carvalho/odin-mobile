@@ -1,0 +1,64 @@
+{
+  "expo": {
+    "name": "ODIN V2",
+    "slug": "odin-mobile",
+    "version": "0.2.0",
+    "orientation": "portrait",
+    "scheme": "odin",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#050608",
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/e7cc460f-1d95-4f4f-b969-a2d3fa4290af",
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.odin.mobile",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "package": "com.odin.mobile",
+      "predictiveBackGestureEnabled": false,
+      "softwareKeyboardLayoutMode": "resize",
+      "adaptiveIcon": {
+        "backgroundColor": "#050608"
+      }
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#050608"
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ],
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "e7cc460f-1d95-4f4f-b969-a2d3fa4290af"
+      }
+    },
+    "owner": "caua_carvalho"
+  }
+}

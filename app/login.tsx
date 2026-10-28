@@ -1,140 +1,559 @@
 import React, { useState } from 'react'
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native'
+import {
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { Ionicons } from '@expo/vector-icons'
-import { useRouter } from 'expo-router'
+import { Redirect, useRouter } from 'expo-router'
+import Animated, { FadeInDown, FadeInUp } from 'react-native-reanimated'
 import { useAuth } from '../contexts/AuthContext'
+import { AgentOrb } from '../components/orb/AgentOrb'
+import { HudBackdrop } from '../components/hud/Backdrop'
+import { HudButton, Panel, PressableScale } from '../components/hud/primitives'
+import { ServerSettings } from '../components/hud/ServerSettings'
+import { getApiBase, isServerConfigured } from '../lib/api'
+import { getErrorMessage } from '../lib/utils'
+import { alpha, colors, fonts, radius, spacing } from '../lib/theme'
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a', justifyContent: 'center', paddingHorizontal: 24 },
-  logo: { alignItems: 'center', marginBottom: 40 },
-  logoIcon: { width: 80, height: 80, borderRadius: 20, backgroundColor: '#ff6b00', justifyContent: 'center', alignItems: 'center', marginBottom: 16 },
-  logoText: { fontSize: 32, fontWeight: '700', color: '#ff6b00', letterSpacing: 2 },
-  subtitle: { color: '#686868', fontSize: 16 },
-  form: { width: '100%', gap: 16 },
-  inputGroup: { gap: 8 },
-  label: { color: '#a8a8a8', fontSize: 13, fontWeight: '600' },
-  inputWrapper: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#181818', borderRadius: 12, paddingHorizontal: 14, borderWidth: 1, borderColor: '#282828' },
-  inputIcon: { marginRight: 12 },
-  input: { flex: 1, color: '#fff', fontSize: 16, paddingVertical: 14 },
-  eyeBtn: { padding: 4 },
-  errorText: { color: '#e05600', fontSize: 12 },
-  submitBtn: { marginTop: 8, backgroundColor: '#ff6b00', paddingVertical: 16, borderRadius: 12, alignItems: 'center' },
-  submitBtnDisabled: { backgroundColor: '#ff6b0080' },
-  submitBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  loadingSpinner: { marginRight: 8 },
-  footer: { marginTop: 32, alignItems: 'center' },
-  footerText: { color: '#505050', fontSize: 13 },
-})
+interface FieldProps {
+  label: string
+  icon: React.ComponentProps<typeof Ionicons>['name']
+  value: string
+  onChangeText: (value: string) => void
+  placeholder: string
+  secure?: boolean
+  keyboardType?: 'default' | 'email-address'
+  autoComplete?: 'email' | 'current-password'
+  returnKeyType?: 'next' | 'go'
+  onSubmitEditing?: () => void
+  editable?: boolean
+  trailing?: React.ReactNode
+}
+
+function Field({
+  label,
+  icon,
+  value,
+  onChangeText,
+  placeholder,
+  secure = false,
+  keyboardType = 'default',
+  autoComplete,
+  returnKeyType,
+  onSubmitEditing,
+  editable = true,
+  trailing,
+}: FieldProps) {
+  const [focused, setFocused] = useState(false)
+  return (
+    <View style={styles.fieldGroup}>
+      <Text style={styles.fieldLabel}>{label}</Text>
+      <View style={[styles.inputShell, focused && styles.inputShellFocused]}>
+        <Ionicons name={icon} size={17} color={focused ? colors.primary : colors.dim} />
+        <TextInput
+          value={value}
+          onChangeText={onChangeText}
+          placeholder={placeholder}
+          placeholderTextColor={colors.dim}
+          secureTextEntry={secure}
+          keyboardType={keyboardType}
+          autoCapitalize="none"
+          autoCorrect={false}
+          autoComplete={autoComplete}
+          returnKeyType={returnKeyType}
+          onSubmitEditing={onSubmitEditing}
+          editable={editable}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          style={styles.input}
+          selectionColor={colors.primary}
+        />
+        {trailing}
+      </View>
+    </View>
+  )
+}
 
 export default function LoginScreen() {
   const router = useRouter()
-  const { login, loading: authLoading } = useAuth()
+  const { user, login, loading: authLoading } = useAuth()
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [serverOpen, setServerOpen] = useState(!isServerConfigured())
+  const [serverConfigured, setServerConfigured] = useState(isServerConfigured())
+  const [serverUrl, setServerUrl] = useState(getApiBase())
+
+  if (user) return <Redirect href="/(tabs)" />
+
+  const busy = submitting || authLoading
 
   const handleSubmit = async () => {
     if (!email.trim() || !password.trim()) {
-      setError('Preencha todos os campos')
+      setError('Informe suas credenciais para abrir o núcleo.')
       return
     }
 
     setError('')
-    setLoading(true)
-
+    setSubmitting(true)
     try {
-      await login(email, password)
+      await login(email.trim(), password)
       router.replace('/(tabs)')
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Erro ao fazer login. Verifique suas credenciais.')
+    } catch (err) {
+      setError(getErrorMessage(err, 'Credenciais inválidas. Verifique email e senha.'))
     } finally {
-      setLoading(false)
+      setSubmitting(false)
     }
   }
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      style={styles.container}
-      keyboardVerticalOffset={0}
-    >
-      <View style={styles.logo}>
-        <View style={styles.logoIcon}>
-          <Ionicons name="construct" size={40} color="#0a0a0a" />
-        </View>
-        <Text style={styles.logoText}>ODIN V2</Text>
-        <Text style={styles.subtitle}>Assistente Pessoal de IA</Text>
-      </View>
-
-      <View style={styles.form}>
-        {error && (
-          <View style={{ backgroundColor: '#e0560020', borderWidth: 1, borderColor: '#e0560040', borderRadius: 8, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <Ionicons name="alert-circle" size={20} color="#e05600" />
-            <Text style={{ color: '#e05600', fontSize: 13, flex: 1 }}>{error}</Text>
-          </View>
-        )}
-
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Email</Text>
-          <View style={styles.inputWrapper}>
-            <Ionicons name="mail" size={22} color="#686868" style={styles.inputIcon} />
-            <TextInput
-              style={styles.input}
-              value={email}
-              onChangeText={setEmail}
-              placeholder="seu@email.com"
-              placeholderTextColor="#686868"
-              autoCapitalize="none"
-              keyboardType="email-address"
-              autoComplete="email"
-              editable={!loading && !authLoading}
-            />
-          </View>
-        </View>
-
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Senha</Text>
-          <View style={styles.inputWrapper}>
-            <Ionicons name="lock-closed" size={22} color="#686868" style={styles.inputIcon} />
-            <TextInput
-              style={styles.input}
-              value={password}
-              onChangeText={setPassword}
-              placeholder="••••••••"
-              placeholderTextColor="#686868"
-              secureTextEntry={!showPassword}
-              autoComplete="current-password"
-              editable={!loading && !authLoading}
-            />
-            <TouchableOpacity onPress={() => setShowPassword(!showPassword)} style={styles.eyeBtn}>
-              <Ionicons name={showPassword ? 'eye-off' : 'eye'} size={22} color="#686868" />
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        <TouchableOpacity
-          onPress={handleSubmit}
-          style={[styles.submitBtn, (loading || authLoading) && styles.submitBtnDisabled]}
-          disabled={loading || authLoading}
+    <SafeAreaView style={styles.root} edges={['top', 'bottom']}>
+      <HudBackdrop />
+      <KeyboardAvoidingView
+        style={styles.flex}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+        <ScrollView
+          contentContainerStyle={styles.content}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
         >
-          {loading || authLoading ? (
-            <>
-              <ActivityIndicator size="small" color="#fff" style={styles.loadingSpinner} />
-              <Text style={styles.submitBtnText}>Entrando...</Text>
-            </>
-          ) : (
-            <Text style={styles.submitBtnText}>Entrar</Text>
-          )}
-        </TouchableOpacity>
-      </View>
+          <Animated.View entering={FadeInDown.duration(500)} style={styles.brandRow}>
+            <View style={styles.brandMark}>
+              <Ionicons name="scan-outline" size={19} color={colors.bg} />
+            </View>
+            <View style={styles.brandCopy}>
+              <Text style={styles.brandName}>ODIN V2</Text>
+              <Text style={styles.brandMeta}>NEURAL COMMAND INTERFACE</Text>
+            </View>
+            <View style={styles.versionChip}>
+              <Text style={styles.versionText}>v0.2</Text>
+            </View>
+          </Animated.View>
 
-      <View style={styles.footer}>
-        <Text style={styles.footerText}>ODIN V2 — Assistente Pessoal de IA</Text>
-      </View>
-    </KeyboardAvoidingView>
+          <Animated.View entering={FadeInDown.delay(80).duration(600)} style={styles.hero}>
+            <AgentOrb state={busy ? 'connecting' : 'idle'} size={168} label="Núcleo ODIN" />
+            <View style={styles.heroCopy}>
+              <Text style={styles.heroEyebrow}>ACESSO AO NÚCLEO</Text>
+              <Text style={styles.heroTitle}>Bem-vindo de volta.</Text>
+              <Text style={styles.heroSubtitle}>
+                Autentique-se para sincronizar conversas, execuções e autorizações com o seu nó ODIN.
+              </Text>
+            </View>
+          </Animated.View>
+
+          <Animated.View entering={FadeInUp.delay(150).duration(500)} style={styles.formWrap}>
+            <Panel glow="orange" style={styles.formPanel}>
+              <View style={styles.formHeader}>
+                <Text style={styles.formTitle}>SESSÃO OPERACIONAL</Text>
+                <View style={styles.secureRow}>
+                  <View style={styles.secureDot} />
+                  <Text style={styles.secureText}>CRIPTOGRAFADA</Text>
+                </View>
+              </View>
+
+              {!serverConfigured ? (
+                <PressableScale
+                  onPress={() => setServerOpen(true)}
+                  accessibilityLabel="Configurar servidor do ODIN"
+                >
+                  <View style={styles.serverWarning}>
+                    <Ionicons name="server-outline" size={15} color={colors.warningLight} />
+                    <Text style={styles.serverWarningText}>
+                      Servidor não configurado. Toque para informar o endereço do backend.
+                    </Text>
+                    <Ionicons name="chevron-forward-outline" size={14} color={colors.warningLight} />
+                  </View>
+                </PressableScale>
+              ) : null}
+
+              {error ? (
+                <View style={styles.errorBox}>
+                  <Ionicons name="warning-outline" size={16} color={colors.dangerLight} />
+                  <Text style={styles.errorText}>{error}</Text>
+                </View>
+              ) : null}
+
+              <Field
+                label="Email"
+                icon="mail-outline"
+                value={email}
+                onChangeText={setEmail}
+                placeholder="operador@odin.ai"
+                keyboardType="email-address"
+                autoComplete="email"
+                returnKeyType="next"
+                editable={!busy}
+              />
+
+              <Field
+                label="Senha"
+                icon="lock-closed-outline"
+                value={password}
+                onChangeText={setPassword}
+                placeholder="••••••••"
+                secure={!showPassword}
+                autoComplete="current-password"
+                returnKeyType="go"
+                onSubmitEditing={() => void handleSubmit()}
+                editable={!busy}
+                trailing={
+                  <PressableScale
+                    onPress={() => setShowPassword((previous) => !previous)}
+                    haptic="selection"
+                    accessibilityLabel={showPassword ? 'Ocultar senha' : 'Mostrar senha'}
+                    hitSlop={10}
+                  >
+                    <Ionicons
+                      name={showPassword ? 'eye-off-outline' : 'eye-outline'}
+                      size={18}
+                      color={colors.muted}
+                    />
+                  </PressableScale>
+                }
+              />
+
+              <HudButton
+                label={busy ? 'Abrindo núcleo…' : 'Acessar núcleo'}
+                icon={busy ? undefined : 'enter-outline'}
+                onPress={() => void handleSubmit()}
+                loading={busy}
+                size="lg"
+                fullWidth
+                style={styles.submit}
+              />
+
+              <View style={styles.formFooter}>
+                <Ionicons name="shield-checkmark-outline" size={13} color={colors.dim} />
+                <Text style={styles.formFooterText}>JWT + SecureStore · sessão renovada automaticamente</Text>
+              </View>
+            </Panel>
+
+            <View style={styles.networkRow}>
+              <PressableScale
+                onPress={() => setServerOpen(true)}
+                accessibilityLabel="Alterar servidor do ODIN"
+              >
+                <View style={styles.networkPill}>
+                  <Ionicons name="server-outline" size={11} color={colors.faint} />
+                  <Text style={styles.networkLabel}>NÓ</Text>
+                  <Text style={styles.networkValue} numberOfLines={1}>
+                    {serverUrl.replace(/^https?:\/\//, '')}
+                  </Text>
+                  <Ionicons name="create-outline" size={12} color={colors.primaryLight} />
+                </View>
+              </PressableScale>
+            </View>
+
+            {__DEV__ ? (
+              <Text style={styles.devHint}>Expo Go · servidor configurável no app</Text>
+            ) : null}
+          </Animated.View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+
+      {serverOpen ? (
+        <ServerSettings
+          onClose={() => setServerOpen(false)}
+          onSaved={(url) => {
+            setServerUrl(url)
+            setServerConfigured(true)
+            setError('')
+          }}
+        />
+      ) : null}
+
+      {busy ? (
+        <View pointerEvents="none" style={styles.busyOverlay}>
+          <ActivityIndicator size="small" color={colors.primary} />
+          <Text style={styles.busyText}>AUTENTICANDO</Text>
+        </View>
+      ) : null}
+    </SafeAreaView>
   )
 }
+
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+    backgroundColor: colors.bg,
+  },
+  flex: {
+    flex: 1,
+  },
+  content: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.xl,
+  },
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.xl,
+  },
+  brandMark: {
+    width: 38,
+    height: 38,
+    borderRadius: radius.md,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: colors.primary,
+    shadowOpacity: 0.45,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  brandCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  brandName: {
+    fontFamily: fonts.monoBold,
+    fontSize: 13,
+    letterSpacing: 2.2,
+    color: colors.text,
+  },
+  brandMeta: {
+    fontFamily: fonts.mono,
+    fontSize: 8,
+    letterSpacing: 1.6,
+    color: colors.dim,
+  },
+  versionChip: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.sm,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: alpha(colors.elevated, 0.7),
+  },
+  versionText: {
+    fontFamily: fonts.mono,
+    fontSize: 9,
+    color: colors.muted,
+  },
+  hero: {
+    alignItems: 'center',
+    marginBottom: spacing.xl,
+  },
+  heroCopy: {
+    alignItems: 'center',
+    marginTop: spacing.xs,
+    maxWidth: 330,
+  },
+  heroEyebrow: {
+    fontFamily: fonts.monoBold,
+    fontSize: 9,
+    letterSpacing: 2.4,
+    color: colors.primaryLight,
+    marginBottom: 6,
+  },
+  heroTitle: {
+    fontFamily: fonts.bold,
+    fontSize: 27,
+    letterSpacing: -0.9,
+    color: colors.text,
+    textAlign: 'center',
+  },
+  heroSubtitle: {
+    fontFamily: fonts.regular,
+    fontSize: 12,
+    lineHeight: 18,
+    color: colors.muted,
+    textAlign: 'center',
+    marginTop: 6,
+  },
+  formWrap: {
+    width: '100%',
+    maxWidth: 440,
+    alignSelf: 'center',
+  },
+  formPanel: {
+    padding: spacing.lg,
+  },
+  formHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing.lg,
+  },
+  formTitle: {
+    fontFamily: fonts.monoBold,
+    fontSize: 10,
+    letterSpacing: 1.5,
+    color: colors.textSoft,
+  },
+  serverWarning: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.xs,
+    backgroundColor: alpha(colors.warning, 0.09),
+    borderWidth: 1,
+    borderColor: alpha(colors.warning, 0.32),
+    borderRadius: radius.md,
+    padding: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  serverWarningText: {
+    flex: 1,
+    fontFamily: fonts.regular,
+    fontSize: 11,
+    lineHeight: 16,
+    color: colors.warningLight,
+  },
+  secureRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  secureDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: colors.success,
+  },
+  secureText: {
+    fontFamily: fonts.mono,
+    fontSize: 8,
+    letterSpacing: 0.8,
+    color: colors.successLight,
+  },
+  errorBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.xs,
+    backgroundColor: alpha(colors.danger, 0.1),
+    borderWidth: 1,
+    borderColor: alpha(colors.danger, 0.3),
+    borderRadius: radius.md,
+    padding: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  errorText: {
+    flex: 1,
+    fontFamily: fonts.regular,
+    fontSize: 12,
+    lineHeight: 17,
+    color: colors.dangerLight,
+  },
+  fieldGroup: {
+    marginBottom: spacing.md,
+  },
+  fieldLabel: {
+    fontFamily: fonts.monoMedium,
+    fontSize: 9,
+    letterSpacing: 1.4,
+    color: colors.muted,
+    textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  inputShell: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: alpha(colors.bg, 0.72),
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.sm,
+    height: 48,
+  },
+  inputShellFocused: {
+    borderColor: alpha(colors.primary, 0.7),
+    backgroundColor: alpha(colors.primary, 0.045),
+  },
+  input: {
+    flex: 1,
+    height: '100%',
+    fontFamily: fonts.regular,
+    fontSize: 14,
+    color: colors.text,
+    paddingVertical: 0,
+  },
+  submit: {
+    marginTop: spacing.xs,
+  },
+  formFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: spacing.md,
+  },
+  formFooterText: {
+    fontFamily: fonts.mono,
+    fontSize: 8,
+    letterSpacing: 0.3,
+    color: colors.dim,
+  },
+  networkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: spacing.lg,
+  },
+  networkPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: alpha(colors.elevated, 0.6),
+    maxWidth: 320,
+  },
+  networkLabel: {
+    fontFamily: fonts.monoBold,
+    fontSize: 8,
+    letterSpacing: 1.2,
+    color: colors.faint,
+  },
+  networkValue: {
+    fontFamily: fonts.mono,
+    fontSize: 9,
+    color: colors.dim,
+    maxWidth: 260,
+  },
+  devHint: {
+    fontFamily: fonts.mono,
+    fontSize: 8,
+    color: colors.faint,
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  busyOverlay: {
+    position: 'absolute',
+    bottom: 24,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: radius.pill,
+    backgroundColor: alpha(colors.surface, 0.92),
+    borderWidth: 1,
+    borderColor: alpha(colors.primary, 0.25),
+  },
+  busyText: {
+    fontFamily: fonts.monoBold,
+    fontSize: 8,
+    letterSpacing: 1.4,
+    color: colors.primaryLight,
+  },
+})

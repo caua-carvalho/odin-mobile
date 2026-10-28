@@ -1,313 +1,924 @@
-import React, { useState, useEffect } from 'react'
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, FlatList, Alert, ActivityIndicator, Modal } from 'react-native'
-import { SafeAreaView } from 'react-native-safe-area-context'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  ActivityIndicator,
+  Alert,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native'
+import { useRouter } from 'expo-router'
 import { Ionicons } from '@expo/vector-icons'
-import { cn, formatRelativeTime, formatDate } from '../../lib/utils'
-import { api, type Run, type Approval, type RunEvent } from '../../lib/api'
+import Animated, { FadeInDown } from 'react-native-reanimated'
+import { HudScreen } from '../../components/hud/Screen'
+import { ScreenHeader } from '../../components/hud/ScreenHeader'
+import {
+  Badge,
+  EmptyState,
+  Panel,
+  PressableScale,
+  SectionLabel,
+  type BadgeTone,
+} from '../../components/hud/primitives'
+import { useOdinStatus } from '../../contexts/OdinStatusContext'
+import { api, type Approval, type Run } from '../../lib/api'
+import { alpha, colors, fonts, radius, spacing } from '../../lib/theme'
+import {
+  formatDate,
+  formatDuration,
+  formatRelativeTime,
+  getErrorMessage,
+  pluralize,
+  pretty,
+} from '../../lib/utils'
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#181818' },
-  headerTitle: { fontSize: 20, fontWeight: '700', color: '#ff6b00' },
-  tabsContainer: { flexDirection: 'row', backgroundColor: '#101010', padding: 4, marginHorizontal: 16, marginTop: 12, borderRadius: 10 },
-  tab: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 8 },
-  tabActive: { backgroundColor: '#ff6b00' },
-  tabText: { color: '#fff', fontSize: 13, fontWeight: '600' },
-  tabTextActive: { color: '#0a0a0a' },
-  badge: { backgroundColor: '#e05600', borderRadius: 10, paddingHorizontal: 6, paddingVertical: 1, minWidth: 18, alignItems: 'center' },
-  badgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },
-  listContainer: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 20 },
-  runCard: { backgroundColor: '#101010', borderRadius: 12, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: '#282828' },
-  runHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8 },
-  runStatusDot: { width: 10, height: 10, borderRadius: 5 },
-  runInfo: { flex: 1 },
-  runConvId: { color: '#fff', fontSize: 14, fontWeight: '600' },
-  runStatusBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10 },
-  runStatusText: { color: '#fff', fontSize: 11, fontWeight: '600' },
-  runMeta: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 8 },
-  runMetaItem: { flexDirection: 'row', alignItems: 'center', gap: 4, color: '#686868', fontSize: 12 },
-  runExpanded: { marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#282828' },
-  runResult: { backgroundColor: '#181818', borderRadius: 8, padding: 12, marginBottom: 8 },
-  runResultText: { color: '#a8a8a8', fontSize: 13, fontFamily: 'monospace' },
-  runError: { backgroundColor: '#e0560020', borderWidth: 1, borderColor: '#e0560040', borderRadius: 8, padding: 12, marginBottom: 8 },
-  runErrorText: { color: '#e05600', fontSize: 13, fontFamily: 'monospace' },
-  eventsList: { gap: 8 },
-  eventRow: { flexDirection: 'row', gap: 8, paddingVertical: 4 },
-  eventIcon: { marginTop: 2 },
-  eventTime: { color: '#505050', fontSize: 11, fontFamily: 'monospace' },
-  eventType: { color: '#ff6b00', fontSize: 11, fontWeight: '600', fontFamily: 'monospace' },
-  eventData: { color: '#686868', fontSize: 10, fontFamily: 'monospace', flex: 1 },
-  approvalCard: { backgroundColor: '#101010', borderRadius: 12, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: '#282828' },
-  approvalHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  approvalIcon: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
-  approvalInfo: { flex: 1 },
-  approvalOperation: { color: '#fff', fontSize: 14, fontWeight: '600', fontFamily: 'monospace' },
-  approvalStatusBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10, marginTop: 4 },
-  approvalStatusText: { color: '#fff', fontSize: 11, fontWeight: '600' },
-  approvalDetails: { color: '#686868', fontSize: 12, fontFamily: 'monospace', marginTop: 8 },
-  approvalDate: { color: '#505050', fontSize: 11, marginTop: 8 },
-  approvalActions: { flexDirection: 'row', gap: 8, marginTop: 12 },
-  approvalBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 10, borderRadius: 8, backgroundColor: '#181818', borderWidth: 1, borderColor: '#282828' },
-  approvalBtnPrimary: { backgroundColor: '#ff6b00', borderColor: '#ff6b00' },
-  approvalBtnDanger: { backgroundColor: '#e05600', borderColor: '#e05600' },
-  approvalBtnText: { color: '#fff', fontWeight: '600', fontSize: 13 },
-  emptyState: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
-  emptyIcon: { marginBottom: 16 },
-  emptyTitle: { color: '#fff', fontSize: 18, fontWeight: '600', marginBottom: 8 },
-  emptySubtitle: { color: '#686868', fontSize: 14, textAlign: 'center' },
-  loadingOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(10,10,10,0.9)', justifyContent: 'center', alignItems: 'center', zIndex: 100 },
-  sectionTitle: { color: '#686868', fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12, paddingHorizontal: 16, marginTop: 8 },
-})
+type TabKey = 'runs' | 'approvals'
 
-const RUN_STATUS_CONFIG: Record<string, { label: string; color: string; bg: string; icon: React.ComponentProps<typeof Ionicons>['name'] }> = {
-  queued: { label: 'Na fila', color: '#686868', bg: '#181818', icon: 'time' },
-  running: { label: 'Executando', color: '#ff6b00', bg: '#ff6b0020', icon: 'refresh' },
-  waiting_approval: { label: 'Aguardando aprovação', color: '#ffaa00', bg: '#ffaa0020', icon: 'alert-circle' },
-  completed: { label: 'Concluído', color: '#00d47e', bg: '#00d47e20', icon: 'checkmark-circle' },
-  failed: { label: 'Falhou', color: '#e05600', bg: '#e0560020', icon: 'close-circle' },
-  cancelled: { label: 'Cancelado', color: '#686868', bg: '#181818', icon: 'close-circle' },
-  interrupted: { label: 'Interrompido', color: '#686868', bg: '#181818', icon: 'flash' },
+const RUN_META: Record<
+  string,
+  { label: string; tone: BadgeTone; icon: React.ComponentProps<typeof Ionicons>['name']; color: string }
+> = {
+  queued: { label: 'Na fila', tone: 'neutral', icon: 'time-outline', color: colors.dim },
+  running: { label: 'Executando', tone: 'primary', icon: 'sync-outline', color: colors.primaryLight },
+  waiting_approval: {
+    label: 'Aguardando',
+    tone: 'warning',
+    icon: 'shield-half-outline',
+    color: colors.warningLight,
+  },
+  completed: { label: 'Concluída', tone: 'success', icon: 'checkmark-circle-outline', color: colors.successLight },
+  failed: { label: 'Falhou', tone: 'danger', icon: 'close-circle-outline', color: colors.dangerLight },
+  cancelled: { label: 'Cancelada', tone: 'neutral', icon: 'ban-outline', color: colors.dim },
+  interrupted: { label: 'Interrompida', tone: 'neutral', icon: 'flash-outline', color: colors.dim },
 }
 
-const APPROVAL_STATUS_CONFIG: Record<string, { label: string; color: string; bg: string; icon: React.ComponentProps<typeof Ionicons>['name'] }> = {
-  pending: { label: 'Pendente', color: '#ffaa00', bg: '#ffaa0020', icon: 'time' },
-  approved: { label: 'Aprovado', color: '#00d47e', bg: '#00d47e20', icon: 'checkmark-circle' },
-  denied: { label: 'Negado', color: '#e05600', bg: '#e0560020', icon: 'close-circle' },
-  expired: { label: 'Expirado', color: '#686868', bg: '#181818', icon: 'time' },
+const APPROVAL_META: Record<
+  string,
+  { label: string; tone: BadgeTone; icon: React.ComponentProps<typeof Ionicons>['name']; color: string }
+> = {
+  pending: { label: 'Pendente', tone: 'warning', icon: 'time-outline', color: colors.warningLight },
+  approved: { label: 'Aprovada', tone: 'success', icon: 'checkmark-circle-outline', color: colors.successLight },
+  denied: { label: 'Negada', tone: 'danger', icon: 'close-circle-outline', color: colors.dangerLight },
+  expired: { label: 'Expirada', tone: 'neutral', icon: 'hourglass-outline', color: colors.dim },
 }
 
 export default function ActivityScreen() {
+  const router = useRouter()
+  const { refresh: refreshStatus } = useOdinStatus()
+
   const [runs, setRuns] = useState<Run[]>([])
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [loading, setLoading] = useState(true)
-  const [activeTab, setActiveTab] = useState<'runs' | 'approvals'>('runs')
+  const [refreshing, setRefreshing] = useState(false)
+  const [activeTab, setActiveTab] = useState<TabKey>('runs')
   const [expandedRun, setExpandedRun] = useState<string | null>(null)
+  const [busyApproval, setBusyApproval] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const mounted = useRef(true)
 
   useEffect(() => {
-    loadData()
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
   }, [])
 
-  const loadData = async () => {
-    setLoading(true)
+  const loadData = useCallback(async () => {
     try {
       const [runsData, approvalsData] = await Promise.all([
-        api.listRuns({ page_size: 50 }).catch(() => []),
-        api.listApprovals().catch(() => ({ items: [] })),
+        api.listRuns({ page_size: 50 }),
+        api.listApprovals(),
       ])
-      setRuns(runsData || [])
-      setApprovals(approvalsData.items || [])
+      if (!mounted.current) return
+      setRuns(runsData)
+      setApprovals(approvalsData.items)
+      setError(null)
     } catch (err) {
-      console.error(err)
+      if (mounted.current) setError(getErrorMessage(err, 'Erro ao carregar a atividade.'))
     } finally {
-      setLoading(false)
+      if (mounted.current) setLoading(false)
     }
+  }, [])
+
+  useEffect(() => {
+    // Initial fetch plus polling; data lands after the awaited requests resolve.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadData()
+    const timer = setInterval(() => {
+      void loadData()
+    }, 20_000)
+    return () => clearInterval(timer)
+  }, [loadData])
+
+  const handleRefresh = async () => {
+    setRefreshing(true)
+    await Promise.allSettled([loadData(), refreshStatus()])
+    if (mounted.current) setRefreshing(false)
   }
 
-  const handleApprove = async (approvalId: string) => {
+  const resolveApproval = async (approval: Approval, decision: 'approve' | 'deny') => {
+    if (busyApproval) return
+    setBusyApproval(approval.id)
     try {
-      await api.approve(approvalId)
-      setApprovals(prev => prev.map(a => a.id === approvalId ? { ...a, status: 'approved' as const } : a))
-    } catch (err: any) {
-      Alert.alert('Erro', err.response?.data?.detail || 'Erro ao aprovar')
+      if (decision === 'approve') await api.approve(approval.id)
+      else await api.deny(approval.id)
+      setApprovals((previous) =>
+        previous.map((item) =>
+          item.id === approval.id
+            ? {
+                ...item,
+                status: decision === 'approve' ? 'approved' : 'denied',
+                resolved_at: new Date().toISOString(),
+              }
+            : item,
+        ),
+      )
+      void refreshStatus()
+    } catch (err) {
+      Alert.alert('Falha', getErrorMessage(err, 'Não foi possível responder à autorização.'))
+    } finally {
+      if (mounted.current) setBusyApproval(null)
     }
   }
 
-  const handleDeny = async (approvalId: string) => {
-    try {
-      await api.deny(approvalId)
-      setApprovals(prev => prev.map(a => a.id === approvalId ? { ...a, status: 'denied' as const } : a))
-    } catch (err: any) {
-      Alert.alert('Erro', err.response?.data?.detail || 'Erro ao negar')
-    }
-  }
-
-  if (loading) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.loadingOverlay}>
-          <ActivityIndicator size="large" color="#ff6b00" />
-        </View>
-      </SafeAreaView>
-    )
-  }
-
-  const pendingCount = approvals.filter(a => a.status === 'pending').length
+  const pending = approvals.filter((approval) => approval.status === 'pending')
+  const resolved = approvals.filter((approval) => approval.status !== 'pending')
+  const activeRuns = runs.filter((run) => ['queued', 'running', 'waiting_approval'].includes(run.status))
 
   return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>Atividade</Text>
+    <HudScreen scroll={false}>
+      <ScreenHeader
+        eyebrow="Fluxo operacional"
+        title="Atividade"
+        subtitle="Execuções do agente e protocolos que aguardam a sua validação."
+        right={
+          activeRuns.length > 0 ? (
+            <Badge
+              label={`${activeRuns.length} ativo${activeRuns.length > 1 ? 's' : ''}`}
+              tone="primary"
+              dot
+            />
+          ) : (
+            <Badge label="Em repouso" tone="neutral" dot />
+          )
+        }
+      />
+
+      <View style={styles.tabWrap}>
+        <TabButton
+          label="Execuções"
+          icon="terminal-outline"
+          active={activeTab === 'runs'}
+          count={runs.length}
+          onPress={() => setActiveTab('runs')}
+        />
+        <TabButton
+          label="Aprovações"
+          icon="shield-half-outline"
+          active={activeTab === 'approvals'}
+          count={pending.length}
+          highlight={pending.length > 0}
+          onPress={() => setActiveTab('approvals')}
+        />
       </View>
 
-      <View style={styles.tabsContainer}>
-        <TouchableOpacity onPress={() => setActiveTab('runs')} style={[styles.tab, activeTab === 'runs' && styles.tabActive]}>
-          <Ionicons name="terminal" size={20} color={activeTab === 'runs' ? '#0a0a0a' : '#fff'} />
-          <Text style={[styles.tabText, activeTab === 'runs' && styles.tabTextActive]}>Execuções</Text>
-        </TouchableOpacity>
-        <TouchableOpacity onPress={() => setActiveTab('approvals')} style={[styles.tab, activeTab === 'approvals' && styles.tabActive]}>
-          <Ionicons name="shield" size={20} color={activeTab === 'approvals' ? '#0a0a0a' : '#fff'} />
-          <Text style={[styles.tabText, activeTab === 'approvals' && styles.tabTextActive]}>Aprovações</Text>
-          {pendingCount > 0 && <View style={styles.badge}><Text style={styles.badgeText}>{pendingCount}</Text></View>}
-        </TouchableOpacity>
-      </View>
+      {error ? (
+        <View style={styles.errorRow}>
+          <Ionicons name="warning-outline" size={13} color={colors.dangerLight} />
+          <Text style={styles.errorText}>{error}</Text>
+        </View>
+      ) : null}
 
-      {activeTab === 'runs' && (
-        <ScrollView style={styles.listContainer} showsVerticalScrollIndicator={false}>
-          {runs.length === 0 ? (
-            <View style={styles.emptyState}>
-              <Ionicons name="terminal-outline" size={64} color="#282828" style={styles.emptyIcon} />
-              <Text style={styles.emptyTitle}>Nenhuma execução</Text>
-              <Text style={styles.emptySubtitle}>Inicie uma conversa no Chat para ver execuções aqui</Text>
-            </View>
+      {loading && runs.length === 0 && approvals.length === 0 ? (
+        <View style={styles.loading}>
+          <ActivityIndicator size="small" color={colors.primary} />
+          <Text style={styles.loadingText}>Sincronizando atividade…</Text>
+        </View>
+      ) : (
+        <ScrollView
+          style={styles.list}
+          contentContainerStyle={styles.listContent}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={() => void handleRefresh()}
+              tintColor={colors.primary}
+              colors={[colors.primary]}
+              progressBackgroundColor={colors.elevated}
+            />
+          }
+        >
+          {activeTab === 'runs' ? (
+            runs.length === 0 ? (
+              <EmptyState
+                icon="terminal-outline"
+                title="Nenhuma execução"
+                description="Inicie uma conversa para ver o histórico de runs do Hermes aqui."
+              />
+            ) : (
+              <>
+                {activeRuns.length > 0 ? (
+                  <View style={styles.section}>
+                    <SectionLabel title="Em andamento" />
+                    {activeRuns.map((run, index) => (
+                      <Animated.View
+                        key={run.id}
+                        entering={FadeInDown.delay(index * 35).duration(260)}
+                      >
+                        <RunCard
+                          run={run}
+                          expanded={expandedRun === run.id}
+                          onToggle={() => setExpandedRun((previous) => (previous === run.id ? null : run.id))}
+                          onOpenSession={() =>
+                            router.push({
+                              pathname: '/(tabs)/chat',
+                              params: { conversationId: run.conversation_id },
+                            })
+                          }
+                        />
+                      </Animated.View>
+                    ))}
+                  </View>
+                ) : null}
+
+                <View style={styles.section}>
+                  <SectionLabel title="Histórico de execuções" />
+                  {runs.map((run, index) => (
+                    <Animated.View
+                      key={run.id}
+                      entering={FadeInDown.delay(Math.min(index, 8) * 30).duration(240)}
+                    >
+                      <RunCard
+                        run={run}
+                        expanded={expandedRun === run.id}
+                        onToggle={() => setExpandedRun((previous) => (previous === run.id ? null : run.id))}
+                        onOpenSession={() =>
+                          router.push({
+                            pathname: '/(tabs)/chat',
+                            params: { conversationId: run.conversation_id },
+                          })
+                        }
+                      />
+                    </Animated.View>
+                  ))}
+                </View>
+              </>
+            )
+          ) : approvals.length === 0 ? (
+            <EmptyState
+              icon="shield-checkmark-outline"
+              title="Nenhuma aprovação"
+              description="Operações que exigem a sua validação aparecerão aqui em tempo real."
+            />
           ) : (
             <>
-              <Text style={styles.sectionTitle}>Execuções Recentes</Text>
-              <FlatList
-                data={runs}
-                keyExtractor={item => item.id}
-                renderItem={({ item }) => (
-                  <RunCard
-                    run={item}
-                    isExpanded={expandedRun === item.id}
-                    onPress={() => setExpandedRun(prev => prev === item.id ? null : item.id)}
+              {pending.length > 0 ? (
+                <View style={styles.section}>
+                  <SectionLabel title="Aguardando o operador" />
+                  {pending.map((approval, index) => (
+                    <Animated.View
+                      key={approval.id}
+                      entering={FadeInDown.delay(index * 40).duration(260)}
+                    >
+                      <ApprovalCard
+                        approval={approval}
+                        busy={busyApproval === approval.id}
+                        onApprove={() => void resolveApproval(approval, 'approve')}
+                        onDeny={() => void resolveApproval(approval, 'deny')}
+                      />
+                    </Animated.View>
+                  ))}
+                </View>
+              ) : null}
+
+              {resolved.length > 0 ? (
+                <View style={styles.section}>
+                  <SectionLabel
+                    title="Resolvidas"
+                    right={
+                      <Text style={styles.sectionMeta}>
+                        {resolved.length} {pluralize(resolved.length, 'registro', 'registros')}
+                      </Text>
+                    }
                   />
-                )}
-              />
+                  {resolved.slice(0, 20).map((approval) => (
+                    <ApprovalCard key={approval.id} approval={approval} readonly />
+                  ))}
+                </View>
+              ) : null}
             </>
           )}
         </ScrollView>
       )}
-
-      {activeTab === 'approvals' && (
-        <ScrollView style={styles.listContainer} showsVerticalScrollIndicator={false}>
-          {approvals.length === 0 ? (
-            <View style={styles.emptyState}>
-              <Ionicons name="shield-outline" size={64} color="#282828" style={styles.emptyIcon} />
-              <Text style={styles.emptyTitle}>Nenhuma aprovação</Text>
-              <Text style={styles.emptySubtitle}>Operações que exigem sua aprovação aparecerão aqui</Text>
-            </View>
-          ) : (
-            <>
-              {approvals.filter(a => a.status === 'pending').length > 0 && (
-                <Text style={styles.sectionTitle}>Pendentes</Text>
-              )}
-              <FlatList
-                data={approvals.filter(a => a.status === 'pending')}
-                keyExtractor={item => item.id}
-                renderItem={({ item }) => <ApprovalCard approval={item} onApprove={handleApprove} onDeny={handleDeny} />}
-              />
-              {approvals.filter(a => a.status !== 'pending').length > 0 && (
-                <Text style={styles.sectionTitle}>Resolvidas</Text>
-              )}
-              <FlatList
-                data={approvals.filter(a => a.status !== 'pending').slice(0, 10)}
-                keyExtractor={item => item.id}
-                renderItem={({ item }) => <ApprovalCard approval={item} onApprove={handleApprove} onDeny={handleDeny} readonly />}
-              />
-            </>
-          )}
-        </ScrollView>
-      )}
-    </SafeAreaView>
+    </HudScreen>
   )
 }
 
-function RunCard({ run, isExpanded, onPress }: { run: Run; isExpanded: boolean; onPress: () => void }) {
-  const config = RUN_STATUS_CONFIG[run.status] || RUN_STATUS_CONFIG.queued
-
+function TabButton({
+  label,
+  icon,
+  active,
+  count,
+  highlight = false,
+  onPress,
+}: {
+  label: string
+  icon: React.ComponentProps<typeof Ionicons>['name']
+  active: boolean
+  count: number
+  highlight?: boolean
+  onPress: () => void
+}) {
   return (
-    <TouchableOpacity onPress={onPress} style={styles.runCard} activeOpacity={0.9}>
-      <View style={styles.runHeader}>
-        <View style={[styles.runStatusDot, { backgroundColor: config.color }]} />
-        <View style={styles.runInfo}>
-          <Text style={styles.runConvId}>Run {run.id.slice(0, 8)}...</Text>
-          <View style={[styles.runStatusBadge, { backgroundColor: config.bg, borderWidth: 1, borderColor: config.color + '60' }]}>
-            <Ionicons name={config.icon} size={12} color={config.color} />
-            <Text style={[styles.runStatusText, { color: config.color }]}>{config.label}</Text>
+    <PressableScale
+      accessibilityLabel={label}
+      accessibilityRole="tab"
+      haptic="selection"
+      onPress={onPress}
+      style={styles.tabPress}
+    >
+      <View style={[styles.tab, active && styles.tabActive]}>
+        <Ionicons name={icon} size={15} color={active ? colors.bg : colors.muted} />
+        <Text style={[styles.tabText, active && styles.tabTextActive]}>{label}</Text>
+        {count > 0 ? (
+          <View
+            style={[
+              styles.tabCount,
+              active && styles.tabCountActive,
+              highlight && !active && styles.tabCountHighlight,
+            ]}
+          >
+            <Text
+              style={[
+                styles.tabCountText,
+                active && styles.tabCountTextActive,
+                highlight && !active && styles.tabCountTextHighlight,
+              ]}
+            >
+              {count > 99 ? '99+' : count}
+            </Text>
           </View>
-        </View>
+        ) : null}
       </View>
+    </PressableScale>
+  )
+}
 
-      <View style={styles.runMeta}>
+function RunCard({
+  run,
+  expanded,
+  onToggle,
+  onOpenSession,
+}: {
+  run: Run
+  expanded: boolean
+  onToggle: () => void
+  onOpenSession: () => void
+}) {
+  const meta = RUN_META[run.status] ?? RUN_META.queued
+  return (
+    <Panel style={styles.runCard}>
+      <PressableScale accessibilityLabel={`Detalhes da execução ${run.id.slice(0, 8)}`} haptic="selection" onPress={onToggle}>
+        <View style={styles.runHeader}>
+          <View style={[styles.runIcon, { borderColor: alpha(meta.color, 0.32) }]}>
+            <Ionicons name={meta.icon} size={16} color={meta.color} />
+          </View>
+          <View style={styles.runCopy}>
+            <Text style={styles.runId}>Run {run.id.slice(0, 8)}</Text>
+            <Text style={styles.runTime}>
+              {formatRelativeTime(run.started_at)} · {run.conversation_id.slice(0, 8)}
+            </Text>
+          </View>
+          <Badge label={meta.label} tone={meta.tone} dot />
+        </View>
+      </PressableScale>
+
+      <View style={styles.runMetaRow}>
         <View style={styles.runMetaItem}>
-          <Ionicons name="calendar" size={14} />
-          <Text>{formatDate(run.started_at)}</Text>
+          <Ionicons name="calendar-outline" size={11} color={colors.faint} />
+          <Text style={styles.runMetaText}>{formatDate(run.started_at)}</Text>
         </View>
-        {run.completed_at && (
-          <View style={styles.runMetaItem}>
-            <Ionicons name="timer" size={14} />
-            <Text>{Math.round((new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000)}s</Text>
-          </View>
-        )}
+        <View style={styles.runMetaItem}>
+          <Ionicons name="timer-outline" size={11} color={colors.faint} />
+          <Text style={styles.runMetaText}>
+            {formatDuration(run.started_at, run.completed_at)}
+          </Text>
+        </View>
+        {run.queue_position ? (
+          <Badge label={`${run.queue_position}º na fila`} tone="neutral" />
+        ) : null}
       </View>
 
-      {isExpanded && (
+      {run.result_summary && !expanded ? (
+        <Text style={styles.runPreview} numberOfLines={2}>
+          {run.result_summary}
+        </Text>
+      ) : null}
+
+      {expanded ? (
         <View style={styles.runExpanded}>
-          {run.result_summary && (
-            <View style={styles.runResult}>
-              <Text style={styles.runResultText}>{run.result_summary}</Text>
+          {run.result_summary ? (
+            <View style={styles.resultBox}>
+              <Text style={styles.resultLabel}>Resultado</Text>
+              <Text style={styles.resultText}>{run.result_summary}</Text>
             </View>
-          )}
-          {run.error && (
-            <View style={styles.runError}>
+          ) : null}
+
+          {run.error ? (
+            <View style={styles.runErrorBox}>
+              <Ionicons name="warning-outline" size={13} color={colors.dangerLight} />
               <Text style={styles.runErrorText}>{run.error}</Text>
             </View>
-          )}
-          {run.events && run.events.length > 0 && (
-            <View style={styles.eventsList}>
-              {run.events.map((event, idx) => (
-                <View key={idx} style={styles.eventRow}>
-                  <Ionicons name="ellipse" size={12} color="#ff6b00" style={styles.eventIcon} />
+          ) : null}
+
+          {run.events && run.events.length > 0 ? (
+            <View style={styles.eventsBox}>
+              <Text style={styles.resultLabel}>Eventos ({run.events.length})</Text>
+              {run.events.slice(-8).map((event, index) => (
+                <View key={`${event.type}-${index}`} style={styles.eventRow}>
+                  <View style={styles.eventDot} />
                   <Text style={styles.eventTime}>{formatDate(event.timestamp)}</Text>
                   <Text style={styles.eventType}>{event.type}</Text>
-                  <Text style={styles.eventData} numberOfLines={1}>{JSON.stringify(event.data).slice(0, 80)}</Text>
+                  <Text style={styles.eventData} numberOfLines={1}>
+                    {pretty(event.data, 90)}
+                  </Text>
                 </View>
               ))}
             </View>
-          )}
+          ) : null}
+
+          <PressableScale
+            accessibilityLabel="Abrir sessão da execução"
+            haptic="selection"
+            onPress={onOpenSession}
+          >
+            <View style={styles.openSession}>
+              <Ionicons name="chatbubbles-outline" size={14} color={colors.primaryLight} />
+              <Text style={styles.openSessionText}>Abrir sessão</Text>
+              <Ionicons name="arrow-forward" size={13} color={colors.primaryLight} />
+            </View>
+          </PressableScale>
         </View>
-      )}
-    </TouchableOpacity>
+      ) : null}
+    </Panel>
   )
 }
 
-function ApprovalCard({ approval, onApprove, onDeny, readonly = false }: { approval: Approval; onApprove: (id: string) => void; onDeny: (id: string) => void; readonly?: boolean }) {
-  const config = APPROVAL_STATUS_CONFIG[approval.status] || APPROVAL_STATUS_CONFIG.pending
+function ApprovalCard({
+  approval,
+  busy = false,
+  readonly = false,
+  onApprove,
+  onDeny,
+}: {
+  approval: Approval
+  busy?: boolean
+  readonly?: boolean
+  onApprove?: () => void
+  onDeny?: () => void
+}) {
+  const meta = APPROVAL_META[approval.status] ?? APPROVAL_META.pending
+  const details = (approval.details || {}) as Record<string, any>
+  const command = typeof details.command === 'string' ? details.command : ''
+  const description = typeof details.description === 'string' ? details.description : ''
 
   return (
-    <View style={styles.approvalCard}>
+    <Panel
+      glow={approval.status === 'pending' ? 'orange' : 'none'}
+      style={[styles.approvalCard, approval.status === 'pending' && styles.approvalCardPending]}
+    >
       <View style={styles.approvalHeader}>
-        <View style={[styles.approvalIcon, { backgroundColor: config.bg, borderWidth: 1, borderColor: config.color + '60' }]}>
-          <Ionicons name={config.icon} size={20} color={config.color} />
+        <View style={[styles.approvalIcon, { borderColor: alpha(meta.color, 0.32) }]}>
+          <Ionicons name={meta.icon} size={17} color={meta.color} />
         </View>
-        <View style={styles.approvalInfo}>
-          <Text style={styles.approvalOperation}>{approval.operation}</Text>
-          <View style={[styles.approvalStatusBadge, { backgroundColor: config.bg, borderWidth: 1, borderColor: config.color + '60' }]}>
-            <Ionicons name={config.icon} size={12} color={config.color} />
-            <Text style={[styles.approvalStatusText, { color: config.color }]}>{config.label}</Text>
-          </View>
+        <View style={styles.approvalCopy}>
+          <Text style={styles.approvalOperation} numberOfLines={1}>
+            {approval.operation}
+          </Text>
+          <Text style={styles.approvalMeta}>
+            Run {approval.run_id.slice(0, 8)} · {formatRelativeTime(approval.created_at)}
+          </Text>
         </View>
+        <Badge label={meta.label} tone={meta.tone} dot />
       </View>
 
-      <Text style={styles.approvalDetails}>{JSON.stringify(approval.details).slice(0, 120)}</Text>
+      {description ? <Text style={styles.approvalDescription}>{description}</Text> : null}
 
-      <Text style={styles.approvalDate}>
-        Criado em {formatDate(approval.created_at)}
-        {approval.expires_at && ` • Expira em ${formatDate(approval.expires_at)}`}
-      </Text>
-
-      {!readonly && approval.status === 'pending' && (
-        <View style={styles.approvalActions}>
-          <TouchableOpacity onPress={() => onDeny(approval.id)} style={styles.approvalBtn}>
-            <Ionicons name="close" size={18} />
-            <Text style={styles.approvalBtnText}>Negar</Text>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={() => onApprove(approval.id)} style={[styles.approvalBtn, styles.approvalBtnPrimary]}>
-            <Ionicons name="checkmark" size={18} />
-            <Text style={styles.approvalBtnText}>Aprovar</Text>
-          </TouchableOpacity>
+      {command ? (
+        <View style={styles.commandBox}>
+          <Text style={styles.commandText} numberOfLines={6}>
+            {command}
+          </Text>
         </View>
-      )}
-    </View>
+      ) : null}
+
+      {!command && Object.keys(details).length > 0 ? (
+        <Text style={styles.approvalDetails} numberOfLines={3}>
+          {pretty(details, 180)}
+        </Text>
+      ) : null}
+
+      {approval.expires_at ? (
+        <View style={styles.expiryRow}>
+          <Ionicons name="hourglass-outline" size={11} color={colors.dim} />
+          <Text style={styles.expiryText}>Expira {formatRelativeTime(approval.expires_at)}</Text>
+        </View>
+      ) : null}
+
+      {!readonly && approval.status === 'pending' ? (
+        <View style={styles.approvalActions}>
+          <PressableScale
+            accessibilityLabel="Negar autorização"
+            haptic="light"
+            disabled={busy}
+            onPress={onDeny}
+            style={styles.approvalActionPress}
+          >
+            <View style={[styles.approvalAction, styles.approvalActionDeny]}>
+              <Ionicons name="close" size={14} color={colors.dangerLight} />
+              <Text style={[styles.approvalActionText, { color: colors.dangerLight }]}>Negar</Text>
+            </View>
+          </PressableScale>
+          <PressableScale
+            accessibilityLabel="Aprovar autorização"
+            haptic="medium"
+            disabled={busy}
+            onPress={onApprove}
+            style={styles.approvalActionPress}
+          >
+            <View style={[styles.approvalAction, styles.approvalActionAllow, busy && { opacity: 0.55 }]}>
+              {busy ? (
+                <ActivityIndicator size="small" color={colors.bg} />
+              ) : (
+                <Ionicons name="checkmark" size={14} color={colors.bg} />
+              )}
+              <Text style={[styles.approvalActionText, { color: colors.bg }]}>Aprovar</Text>
+            </View>
+          </PressableScale>
+        </View>
+      ) : null}
+    </Panel>
   )
 }
+
+const styles = StyleSheet.create({
+  tabWrap: {    flexDirection: 'row',
+    gap: 4,
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.sm,
+    padding: 4,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: alpha(colors.surface, 0.85),
+  },
+  tabPress: {
+    flex: 1,
+  },
+  tab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingVertical: 8,
+    borderRadius: radius.sm,
+  },
+  tabActive: {
+    backgroundColor: colors.primary,
+  },
+  tabText: {
+    fontFamily: fonts.monoMedium,
+    fontSize: 9,
+    letterSpacing: 0.4,
+    color: colors.muted,
+    textTransform: 'uppercase',
+  },
+  tabTextActive: {
+    color: colors.bg,
+  },
+  tabCount: {
+    minWidth: 16,
+    height: 16,
+    paddingHorizontal: 4,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: alpha(colors.elevated, 0.9),
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  tabCountActive: {
+    backgroundColor: alpha(colors.bg, 0.2),
+    borderColor: alpha(colors.bg, 0.3),
+  },
+  tabCountHighlight: {
+    borderColor: alpha(colors.warning, 0.4),
+    backgroundColor: alpha(colors.warning, 0.16),
+  },
+  tabCountText: {
+    fontFamily: fonts.monoBold,
+    fontSize: 7,
+    color: colors.dim,
+  },
+  tabCountTextActive: {
+    color: colors.bg,
+  },
+  tabCountTextHighlight: {
+    color: colors.warningLight,
+  },
+  errorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginHorizontal: spacing.lg,
+    marginBottom: spacing.xs,
+  },
+  errorText: {
+    flex: 1,
+    fontFamily: fonts.regular,
+    fontSize: 11,
+    color: colors.dangerLight,
+  },
+  loading: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+  },
+  loadingText: {
+    fontFamily: fonts.mono,
+    fontSize: 9,
+    letterSpacing: 0.8,
+    color: colors.dim,
+    textTransform: 'uppercase',
+  },
+  list: {
+    flex: 1,
+  },
+  listContent: {
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.sm,
+    flexGrow: 1,
+  },
+  section: {
+    marginBottom: spacing.md,
+  },
+  sectionMeta: {
+    fontFamily: fonts.mono,
+    fontSize: 8,
+    letterSpacing: 0.5,
+    color: colors.faint,
+  },
+  runCard: {
+    marginBottom: spacing.xs,
+    gap: spacing.xs,
+  },
+  runHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  runIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    backgroundColor: alpha(colors.bg, 0.45),
+  },
+  runCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  runId: {
+    fontFamily: fonts.monoMedium,
+    fontSize: 11,
+    color: colors.text,
+  },
+  runTime: {
+    fontFamily: fonts.mono,
+    fontSize: 8,
+    color: colors.dim,
+  },
+  runMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  runMetaItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  runMetaText: {
+    fontFamily: fonts.mono,
+    fontSize: 8,
+    color: colors.dim,
+  },
+  runPreview: {
+    fontFamily: fonts.regular,
+    fontSize: 11,
+    lineHeight: 16,
+    color: colors.muted,
+  },
+  runExpanded: {
+    marginTop: spacing.xs,
+    paddingTop: spacing.sm,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+    gap: spacing.xs,
+  },
+  resultBox: {
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: alpha(colors.bg, 0.5),
+    padding: spacing.sm,
+    gap: 4,
+  },
+  resultLabel: {
+    fontFamily: fonts.monoBold,
+    fontSize: 8,
+    letterSpacing: 1,
+    color: colors.dim,
+    textTransform: 'uppercase',
+  },
+  resultText: {
+    fontFamily: fonts.mono,
+    fontSize: 9,
+    lineHeight: 14,
+    color: colors.textSoft,
+  },
+  runErrorBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 5,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: alpha(colors.danger, 0.3),
+    backgroundColor: alpha(colors.danger, 0.07),
+    padding: spacing.sm,
+  },
+  runErrorText: {
+    flex: 1,
+    fontFamily: fonts.mono,
+    fontSize: 9,
+    lineHeight: 14,
+    color: colors.dangerLight,
+  },
+  eventsBox: {
+    gap: 5,
+  },
+  eventRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  eventDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: colors.primary,
+  },
+  eventTime: {
+    fontFamily: fonts.mono,
+    fontSize: 7,
+    color: colors.faint,
+  },
+  eventType: {
+    fontFamily: fonts.monoMedium,
+    fontSize: 8,
+    color: colors.primaryLight,
+  },
+  eventData: {
+    flex: 1,
+    fontFamily: fonts.mono,
+    fontSize: 7,
+    color: colors.dim,
+  },
+  openSession: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingVertical: 8,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: alpha(colors.primary, 0.28),
+    backgroundColor: alpha(colors.primary, 0.08),
+  },
+  openSessionText: {
+    fontFamily: fonts.monoMedium,
+    fontSize: 9,
+    letterSpacing: 0.5,
+    color: colors.primaryLight,
+    textTransform: 'uppercase',
+  },
+  approvalCard: {
+    marginBottom: spacing.xs,
+    gap: spacing.xs,
+  },
+  approvalCardPending: {
+    borderColor: alpha(colors.warning, 0.32),
+    backgroundColor: alpha(colors.warning, 0.05),
+  },
+  approvalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  approvalIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    backgroundColor: alpha(colors.bg, 0.45),
+  },
+  approvalCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  approvalOperation: {
+    fontFamily: fonts.monoMedium,
+    fontSize: 11,
+    color: colors.text,
+  },
+  approvalMeta: {
+    fontFamily: fonts.mono,
+    fontSize: 8,
+    color: colors.dim,
+  },
+  approvalDescription: {
+    fontFamily: fonts.regular,
+    fontSize: 11,
+    lineHeight: 16,
+    color: colors.muted,
+  },
+  commandBox: {
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: alpha(colors.bg, 0.6),
+    padding: spacing.sm,
+  },
+  commandText: {
+    fontFamily: fonts.mono,
+    fontSize: 9,
+    lineHeight: 14,
+    color: colors.textSoft,
+  },
+  approvalDetails: {
+    fontFamily: fonts.mono,
+    fontSize: 8,
+    lineHeight: 13,
+    color: colors.dim,
+  },
+  expiryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  expiryText: {
+    fontFamily: fonts.mono,
+    fontSize: 8,
+    color: colors.dim,
+  },
+  approvalActions: {
+    flexDirection: 'row',
+    gap: spacing.xs,
+    marginTop: spacing.xs,
+  },
+  approvalActionPress: {
+    flex: 1,
+  },
+  approvalAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingVertical: 9,
+    borderRadius: radius.md,
+    borderWidth: 1,
+  },
+  approvalActionDeny: {
+    borderColor: alpha(colors.danger, 0.34),
+    backgroundColor: alpha(colors.danger, 0.1),
+  },
+  approvalActionAllow: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary,
+  },
+  approvalActionText: {
+    fontFamily: fonts.semibold,
+    fontSize: 11,
+  },
+})
